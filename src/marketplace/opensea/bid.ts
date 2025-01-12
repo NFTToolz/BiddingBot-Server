@@ -419,6 +419,7 @@ export async function bidOnOpensea(
       // Skip logging for collection offers not supported error and duplicate orders
       if (error?.response?.data?.message?.errors?.[0] !== 'Collection offers are not supported for this collection' &&
         !error?.response?.data?.message?.errors?.includes('Duplicate order') &&
+        !error?.message?.errors?.includes('Duplicate order') &&
         !error?.message?.errors?.includes('Duplicate order')) {
         console.log("opensea post offer error: ", error?.response?.data || error?.message || error);
         if (!errorStats[taskId]) {
@@ -506,8 +507,9 @@ async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: 
       }
     } else {
       const errorMessage = error?.response?.data || error?.message || error;
-      if (errorMessage?.message?.errors?.[0] === 'Collection offers are not supported for this collection') {
-        // Ignore this specific error
+      if (errorMessage?.message?.errors?.[0]?.includes('Collection offers are not supported') ||
+        errorMessage?.message?.errors?.[0]?.includes('Duplicate order')) {
+        // Ignore these errors
         return;
       }
       console.log("opensea post offer error", errorMessage);

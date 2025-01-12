@@ -188,7 +188,7 @@ const CANCEL_MAGICEDEN_BID = "CANCEL_MAGICEDEN_BID"
 const CANCEL_BLUR_BID = "CANCEL_BLUR_BID"
 const MAGICEDEN_MARKETPLACE = "0x9A1D00bEd7CD04BCDA516d721A596eb22Aac6834"
 const MAX_RETRIES: number = 5;
-const MARKETPLACE_WS_URL = "wss://wss-marketplace.nfttools.website";
+const MARKETPLACE_WS_URL = "ws://localhost:8080";
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY as string;
 const PRIORITIZED_THRESHOLD = RATE_LIMIT * WORKER_COUNT;
 const OPENSEA_PROTOCOL_ADDRESS = "0x0000000000000068F116a894984e2DB1123eB395"
@@ -991,12 +991,13 @@ async function waitForQueueDrain(): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
 }
-
 // Helper function to chunk array
 function chunk<T>(array: T[], size: number): T[][] {
-  return Array.from({ length: Math.ceil(array.length / size) }, (_, i) =>
-    array.slice(i * size, i * size + size)
-  );
+  return Array.from({ length: Math.ceil(array.length / size) }, (_, i) => {
+    const start = i * size;
+    const end = Math.min(start + size, array.length);
+    return array.slice(start, end);
+  });
 }
 
 async function waitForQueueHealth(): Promise<void> {
@@ -2448,13 +2449,12 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
     }
 
     const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, Number(floor_price), "opensea")
-
     const openseaOutbidMargin = task.outbidOptions.openseaOutbidMargin || 0.0001
-
     const collectionDetails = await getCollectionDetails(task.contract.slug);
     const creatorFees: IFee = collectionDetails.creator_fees.null !== undefined
       ? { null: collectionDetails.creator_fees.null }
       : Object.fromEntries(Object.entries(collectionDetails.creator_fees).map(([key, value]) => [key, Number(value)]));
+
 
     let offerPrice: number;
     let colletionOffer: bigint;
