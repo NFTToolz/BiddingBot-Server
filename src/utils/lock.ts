@@ -50,12 +50,25 @@ export class DistributedLockManager {
     await this.redis.del(lockKey);
   }
 
+  async checkExistLock(key: string): Promise<Boolean> {
+    try{
+      await this.ensureConnection();
+      const lockKey = this.getLockKey(key);
+      const existLockKey = await this.redis.exists(lockKey);
+      return existLockKey === 1;
+    }catch(e){
+      console.log('error in check ExistLock',e)
+      return false;
+    }
+  }
+
   async withLock<T>(
     key: string,
     operation: () => Promise<T>,
     ttlSeconds: number = this.defaultTTLSeconds
   ): Promise<T | null> {
     try {
+      
       const acquired = await this.acquireLock(key, ttlSeconds);
 
       if (!acquired) {

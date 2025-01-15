@@ -231,7 +231,7 @@ function cleanupMemory() {
 
 async function monitorHealth() {
   try {
-    console.log({ bidStats });
+
     const counts = await queue.getJobCounts();
     const used = process.memoryUsage();
     const memoryStats = {
@@ -3142,7 +3142,6 @@ async function processOpenseaScheduledBid(task: ITask) {
     const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price, "opensea")
 
     const approved = await approveMarketplace(WETH_CONTRACT_ADDRESS, SEAPORT, task, maxBidPriceEth);
-
     if (!approved) return
 
     let offerPrice = BigInt(Math.ceil(offerPriceEth * 1e18));
@@ -4720,18 +4719,23 @@ function checkBlurTraits(incomingBids: any, traits: any) {
 
 
 async function approveMarketplace(currency: string, marketplace: string, task: ITask, maxBidPriceEth: number): Promise<boolean> {
+
+  //check approval value and return. If this is not set wethContract.allowance will be called and RPC limit can be drained unecessary.
   const lockKey = `approve:${task.wallet.address.toLowerCase()}:${marketplace.toLowerCase()} `;
+  
+  //check if lockExist. approve can be delayed by blockchain net or gaslimist issue and approveMarketplace function can be called within delaytime. Then approve will be twice.
+  const lockExist = await lockManager.checkExistLock(lockKey); 
+  if(lockExist) return false;
 
   return await lockManager.withLock(lockKey, async () => {
     try {
-      const provider = new ethers.providers.AlchemyProvider('mainnet', ALCHEMY_API_KEY);
-      const signer = new Web3Wallet(task.wallet.privateKey, provider);
-      const wethContract = new Contract(currency, WETH_MIN_ABI, signer);
+      if (!task?.wallet.openseaApproval) {// this check have to placed in firstline. If not, wethContract.allowance will be called and RPC limit can be drained unecessary.
+        const provider = new ethers.providers.AlchemyProvider('mainnet', ALCHEMY_API_KEY);
+        const signer = new Web3Wallet(task.wallet.privateKey, provider);
+        const wethContract = new Contract(currency, WETH_MIN_ABI, signer);
 
-      let allowance = Number(await wethContract.allowance(task.wallet.address, marketplace)) / 1e18;
-      if (allowance > maxBidPriceEth) return true;
-
-      if (!task?.wallet.openseaApproval) {
+        let allowance = Number(await wethContract.allowance(task.wallet.address, marketplace)) / 1e18;
+        if (allowance > maxBidPriceEth) return true;
         console.log(`Approving WETH ${marketplace} as a spender for wallet ${task.wallet.address} with amount: ${constants.MaxUint256.toString()}...`.toUpperCase());
         const tx = await wethContract.approve(marketplace, constants.MaxUint256);
         await tx.wait();
@@ -4741,7 +4745,7 @@ async function approveMarketplace(currency: string, marketplace: string, task: I
           : { magicedenApproval: true };
 
         await Wallet.updateOne({ address: { $regex: new RegExp(task.wallet.address, 'i') } }, updateData);
-        await Task.updateOne({ _id: task._id }, { $set: updateData });
+        await Task.updateOne({ _id: task._id }, { $set: {...task.wallet ,...updateData} });
       }
 
       return true;
