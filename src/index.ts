@@ -192,7 +192,7 @@ const MARKETPLACE_WS_URL = "wss://wss-marketplace.nfttools.website";
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY as string;
 const PRIORITIZED_THRESHOLD = RATE_LIMIT * WORKER_COUNT;
 const OPENSEA_PROTOCOL_ADDRESS = "0x0000000000000068F116a894984e2DB1123eB395"
-const HEALTH_CHECK_INTERVAL = 10000;
+const HEALTH_CHECK_INTERVAL = 10*60*1000;
 
 const MAX_ACTIVE_JOBS = WORKER_COUNT * RATE_LIMIT;
 const QUEUE_LOW_WATERMARK = MAX_ACTIVE_JOBS * 0.75;
@@ -1934,6 +1934,7 @@ async function updateMultipleTasksStatus(data: { tasks: ITask[], running: boolea
 }
 
 let wsConnectionStatus: 'connected' | 'disconnected' | 'connecting' = 'disconnected';
+let pingIntervalId: NodeJS.Timeout | null = null;
 
 async function connectWebSocket(): Promise<void> {
   wsConnectionStatus = 'connecting';
@@ -1941,13 +1942,24 @@ async function connectWebSocket(): Promise<void> {
 
   ws.addEventListener("open", async function open() {
     wsConnectionStatus = 'connected';
+    retryCount = 0;
+    // Send custom ping messages at regular intervals
+    if (pingIntervalId !== null) {
+      clearTimeout(pingIntervalId);
+      pingIntervalId = null;
+    }
+    pingIntervalId = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' })); // Custom ping message
+        console.log('Ping sent to server.');
+      }
+    }, 30000); // 15 seconds interval
     clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({ type: 'wsConnectionStatus', data: wsConnectionStatus }));
       }
     });
     console.log(GOLD + "CONNECTED TO MARKETPLACE EVENTS WEBSOCKET" + RESET);
-    retryCount = 0;
 
     // Clear existing timeouts/intervals
     if (reconnectTimeoutId !== null) {
@@ -1980,6 +1992,9 @@ async function connectWebSocket(): Promise<void> {
     ws.on("message", async function incoming(data: string) {
       try {
         const message = JSON.parse(data.toString())
+        if (message.type === 'pong') {
+          console.log('Pong received from server.');
+        }
         await handleCounterBid(message);
       } catch (error) {
       }
@@ -1995,7 +2010,7 @@ async function connectWebSocket(): Promise<void> {
       }
     });
 
-    console.log(RED + "DISCONNECTED FROM MARKETPLACE EVENTS WEBSCKET" + RESET);
+    console.log(RED + "DISCONNECTED FROM MARKETPLACE EVENTS WEBSCKET"+ `_TIME_AT_${String( new Date().getDate()).padStart(2, '0')} / ${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}` + RESET);
     if (heartbeatIntervalId !== null) {
       clearInterval(heartbeatIntervalId);
       heartbeatIntervalId = null;
