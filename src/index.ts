@@ -1951,7 +1951,7 @@ async function connectWebSocket(): Promise<void> {
     pingIntervalId = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' })); // Custom ping message
-        console.log('Ping sent to server.');
+        console.log('-----PING------');
       }
     }, 30000); // 15 seconds interval
     clients.forEach(client => {
