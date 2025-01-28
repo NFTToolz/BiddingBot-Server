@@ -84,6 +84,29 @@ const QUEUE_OPTIONS: QueueOptions = {
     },
   }
 };
+let netEnabled = true;
+
+const net = require('net');
+
+function checkNetwork() {
+  const socket = new net.Socket();
+
+  socket.setTimeout(5000);
+  socket.on('connect', () => {
+    console.log('Network is connected');
+    netEnabled = true;
+    socket.destroy();
+  });
+
+  socket.on('error', () => {
+    console.log('Network is not connected');
+    netEnabled = false;
+  });
+
+  socket.connect(80, 'google.com');
+}
+
+checkNetwork();
 
 const workers = Array.from({ length: WORKER_COUNT }, (_, index) => new Worker(
   QUEUE_NAME,
@@ -92,6 +115,7 @@ const workers = Array.from({ length: WORKER_COUNT }, (_, index) => new Worker(
       const shutdown = new Promise((_, reject) => {
         process.once('SIGTERM', () => reject(new Error('Worker shutdown')));
       });
+      if(!netEnabled) return;
       try {
         const result = await Promise.race([
           processJob(job),
