@@ -46,6 +46,8 @@ export async function bidOnBlur(
   const bethBalance = await balanceChecker.getBethBalance(wallet_address);
   let offerPriceEth: string | number = (Number(offer_price) / 1e18)
 
+  const leverage = 200
+
   if (offerPriceEth > bethBalance) {
     console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
     console.log(RED + `Offer price: ${offerPriceEth} BETH  is greater than available WETH balance: ${bethBalance} BETH. SKIPPING ...`.toUpperCase() + RESET);
@@ -55,6 +57,9 @@ export async function bidOnBlur(
 
   const offerPrice = BigNumber.from(offer_price.toString());
   const accessToken = await getAccessToken(BLUR_API_URL, private_key);
+
+  console.log({ offerPrice: offerPrice.toString() });
+
 
   offerPriceEth = (Math.floor(Number(utils.formatUnits(offerPrice)) * 100) / 100).toFixed(2);
 
@@ -384,24 +389,23 @@ export async function fetchBlurBid(collection: string, criteriaType: 'TRAIT' | '
   }
 }
 
-export async function fetchBlurCollectionStats(slug: string) {
-  const lockKey = `blur:stats:${slug}`;
 
-  return await lockManager.withLock(lockKey, async () => {
-    const URL = `https://api.nfttools.website/blur/v1/collections/${slug}`;
-    try {
-      const { data } = await limiter.schedule(() => axiosInstance.get(URL, {
-        headers: {
-          'content-type': 'application/json',
-          'X-NFT-API-Key': API_KEY,
-        }
-      }));
-      return data?.collection?.floorPrice?.amount || 0
-    } catch (error: any) {
-      console.error("Error fetching collection data:", error.response?.data || error.message);
-      return 0
-    }
-  });
+export async function fetchBlurCollectionStats(slug: string) {
+  const url = `https://api.nfttools.website/blur/v1/collections/${slug}/tokens`;
+  try {
+    const { data } = await limiter.schedule(() => axiosInstance.get<BlurTokensResponse>(url, {
+      headers: {
+        'content-type': 'application/json',
+        'X-NFT-API-Key': API_KEY,
+      }
+    }));
+    const listings = data.tokens.sort((a, b) => Number(a?.price?.amount) - Number(b?.price?.amount))
+    const floor_price = Number(listings[0]?.price?.amount)
+    return floor_price;
+  } catch (error: any) {
+    console.error("Error fetching collection data:", error.response?.data || error.message);
+    return 0
+  }
 }
 
 
@@ -518,4 +522,42 @@ interface SubmitPayload {
   signature: string;
   marketplaceData: string[];
   [key: string]: any;
+}
+
+
+export interface BlurTokensResponse {
+  success: boolean;
+  contractAddress: string;
+  totalCount: number;
+  tokens: BlurToken[];
+}
+
+export interface BlurToken {
+  tokenId: string;
+  name: string;
+  imageUrl: string;
+  traits: {
+    Tier?: string;
+    State: string;
+    [key: string]: string | undefined;
+  };
+  rarityScore: number;
+  rarityRank: number;
+  price: TokenPrice | null;
+  highestBid: TokenPrice | null;
+  lastSale: TokenPrice | null;
+  lastCostBasis: TokenPrice | null;
+  owner: {
+    address: string;
+    username: string | null;
+  };
+  numberOwnedByOwner: number;
+  isSuspicious: boolean;
+}
+
+export interface TokenPrice {
+  amount: string;
+  unit: string;
+  listedAt: string;
+  marketplace?: string;
 }

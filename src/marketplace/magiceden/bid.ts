@@ -87,11 +87,11 @@ export async function bidOnMagiceden(
         await submitSignedOrderData(taskId, weiPrice, privateKey, bidCount, order, wallet, slug, expiry, undefined, undefined)
       }
     } catch (error) {
-      console.error('Error submitting signed order:', error);
+      throw error
     }
     return order
   } catch (error: any) {
-    console.log("magiceden post offer error: ", error.response.data || error.message);
+    console.log(`magiceden post offer error task ${slug}: `, error.response.data || error.message);
     if (!errorStats[taskId]) {
       errorStats[taskId] = {
         magiceden: 0,

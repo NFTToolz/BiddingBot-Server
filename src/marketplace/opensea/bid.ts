@@ -206,18 +206,53 @@ export async function bidOnOpensea(
   opensea_traits?: string,
   asset?: { contractAddress: string, tokenId: number }
 ) {
-
   const task = currentTasks.find((task) => task.contract.slug.toLowerCase() === slug.toLowerCase() && task.selectedMarketplaces.includes("OpenSea"))
-  if (!task) return
-  const divider = BigNumber.from(10000);
-  const roundedNumber = Math.round(Number(offer_price) / 1e14) * 1e14;
-  const offerPrice = BigNumber.from(roundedNumber.toString());
-  const offerPriceEth = Number(offer_price) / 1e18
+
+  if (!task) {
+    console.log(`stopping task ${taskId} for ${slug}`);
+    return
+  }
+
+  // Convert wei to ETH for precision check
+  const offerPriceEth = Number(offer_price) / 1e18;
+
+  // Determine precision based on price range
+  let decimals;
+  if (offerPriceEth >= 1) {
+    decimals = 2;
+  } else if (offerPriceEth >= 0.1) {
+    decimals = 3;
+  } else {
+    decimals = 4;
+  }
+
+  // Round to the appropriate number of decimals and convert back to wei
+  const roundedEth = Number(offerPriceEth.toFixed(decimals));
+
+  const basis = decimals === 2 ? 1e16 : decimals === 3 ? 1e15 : 1e14
+  // Round to nearest 0.01 ETH (10^16 wei)
+  const roundedWei = Math.floor(roundedEth * 1e18 / basis) * basis;
+
+  const offerPrice = BigNumber.from(roundedWei.toString());
+  const offerPriceEthFinal = Number(roundedWei) / 1e18;
+
+
+
+  console.log({
+    originalPrice: `${offerPriceEth} ETH`,
+    roundedPrice: `${offerPriceEthFinal} ETH`,
+    decimalsUsed: decimals,
+    roundedWei,
+    offerPrice: offerPrice.toString(),
+    slug
+  });
+
+  const leverage = 50;
   const wethBalance = await balanceChecker.getWethBalance(wallet_address);
 
-  if (offerPriceEth > wethBalance) {
+  if (offerPriceEthFinal > wethBalance) {
     console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-    console.log(RED + `Offer price: ${offerPriceEth} WETH  is greater than available WETH balance: ${wethBalance} WETH. SKIPPING ...`.toUpperCase() + RESET);
+    console.log(RED + `Offer price: ${offerPriceEthFinal} WETH  is greater than available WETH balance: ${wethBalance} WETH. SKIPPING ...`.toUpperCase() + RESET);
     console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
     return
   }
@@ -232,7 +267,7 @@ export async function bidOnOpensea(
       walletAddress: wallet_address,
       quantity: 1,
       expirationSeconds: BigInt(900),
-      priceWei: BigInt(roundedNumber)
+      priceWei: BigInt(roundedWei)
     })
 
     if (!offer) return
@@ -241,8 +276,8 @@ export async function bidOnOpensea(
       itemType: 1,
       token: WETH_CONTRACT_ADDRESS,
       identifierOrCriteria: "0",
-      startAmount: +offerPrice.mul(openseaFee).div(divider),
-      endAmount: +offerPrice.mul(openseaFee).div(divider),
+      startAmount: +offerPrice.mul(openseaFee).div(BigNumber.from(10 ** decimals)),
+      endAmount: +offerPrice.mul(openseaFee).div(BigNumber.from(10 ** decimals)),
       recipient: OPENSEA_FEE_ADDRESS
     };
 
@@ -256,8 +291,8 @@ export async function bidOnOpensea(
           itemType: 1,
           token: WETH_CONTRACT_ADDRESS,
           identifierOrCriteria: "0",
-          startAmount: Number(offerPrice.mul(fee).div(divider)),
-          endAmount: Number(offerPrice.mul(fee).div(divider)),
+          startAmount: Number(offerPrice.mul(fee).div(BigNumber.from(10 ** decimals))),
+          endAmount: Number(offerPrice.mul(fee).div(BigNumber.from(10 ** decimals))),
           recipient: address
         };
         offer.consideration.push(consideration_item);
@@ -280,6 +315,7 @@ export async function bidOnOpensea(
     const itemOrderHash = itemResponse?.order?.order_hash
 
     const orderTrackingKey = `{${taskId}}:opensea:orders`;
+
     const orderKey = `{${taskId}}:${count}:opensea:order:${slug}:${asset.tokenId}`;
 
     const order = JSON.stringify({
@@ -287,10 +323,12 @@ export async function bidOnOpensea(
       orderId: itemOrderHash
     })
 
+    const sanitizedExpiry = expiry > 900 ? expiry : 900
+
     await Promise.all([
-      redis.setex(orderKey, expiry, order),
+      redis.setex(orderKey, sanitizedExpiry, order),
       redis.sadd(orderTrackingKey, orderKey),
-      redis.expire(orderTrackingKey, expiry)
+      redis.expire(orderTrackingKey, sanitizedExpiry)
     ]);
 
     trackBidRate('opensea', taskId);
@@ -300,8 +338,7 @@ export async function bidOnOpensea(
   }
   else {
     const divider = BigNumber.from(10000);
-    const roundedNumber = Math.round(Number(offer_price) / 1e14) * 1e14;
-    const offerPrice = BigNumber.from(roundedNumber.toString());
+    const offerPrice = BigNumber.from(roundedWei.toString());
 
     const payload: IPayload = {
       criteria: {
@@ -357,6 +394,7 @@ export async function bidOnOpensea(
 
     try {
       const data = await buildOffer(buildPayload)
+
       if (!data || !data.partialParameters) return
       payload.protocol_data.parameters.startTime = BigInt(Math.floor(Date.now() / 1000)).toString();
       payload.protocol_data.parameters.endTime = BigInt(Math.floor(Date.now() / 1000 + 900)).toString();
@@ -396,10 +434,8 @@ export async function bidOnOpensea(
 
       payload.protocol_data.parameters.zone = data.partialParameters.zone;
       payload.protocol_data.parameters.zoneHash = data.partialParameters.zoneHash;
-      payload.protocol_data.parameters.salt = BigInt(Math.floor(Math.random() * 100_000)).toString();
-
+      payload.protocol_data.parameters.salt = getSalt();
       const counter = await SEAPORT_CONTRACT.getCounter(wallet_address);
-
       payload.protocol_data.parameters.counter = counter.toString();
 
       const signObj = await wallet._signTypedData(
@@ -407,21 +443,20 @@ export async function bidOnOpensea(
         types,
         payload.protocol_data.parameters
       );
-
       payload.protocol_data.signature = signObj;
       payload.protocol_address = SEAPORT_1_6;
-
       const task = currentTasks.find((task) => task.contract.slug.toLowerCase() === slug.toLowerCase() && task.selectedMarketplaces.includes("OpenSea"))
       if (!task) return
 
       await submitOfferToOpensea(slug, bidCount, offerPrice.toString(), payload, expiry, opensea_traits)
     } catch (error: any) {
+
       // Skip logging for collection offers not supported error and duplicate orders
       if (error?.response?.data?.message?.errors?.[0] !== 'Collection offers are not supported for this collection' &&
         !error?.response?.data?.message?.errors?.includes('Duplicate order') &&
         !error?.message?.errors?.includes('Duplicate order') &&
         !error?.message?.errors?.includes('Duplicate order')) {
-        console.log("opensea post offer error: ", error?.response?.data || error?.message || error);
+        console.log(`opensea post offer error task ${slug}: `, error?.response?.data || error?.message || error);
         if (!errorStats[taskId]) {
           errorStats[taskId] = {
             magiceden: 0,
@@ -442,7 +477,6 @@ export async function bidOnOpensea(
  */
 async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: string, payload: IPayload, expiry = 900, opensea_traits?: string) {
   let task = currentTasks.find((task) => task.contract.slug.toLowerCase() === slug.toLowerCase() || task.selectedMarketplaces.includes("OpenSea"))
-  if (!task) return
   try {
 
     const [taskId, count] = bidCount.split(":")
@@ -470,16 +504,16 @@ async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: 
 
     const orderTrackingKey = `{${taskId}}:opensea:orders`;
     const orderKey = `{${taskId}}:${count}:opensea:order:${slug}:${identifier}`;
-
+    const sanitizedExpiry = expiry > 900 ? expiry : 900
     const order = JSON.stringify({
       offer: offerPrice.toString(),
       orderId: order_hash
     })
 
     await Promise.all([
-      redis.setex(orderKey, expiry, order),
+      redis.setex(orderKey, sanitizedExpiry, order),
       redis.sadd(orderTrackingKey, orderKey),
-      redis.expire(orderTrackingKey, expiry)
+      redis.expire(orderTrackingKey, sanitizedExpiry)
     ]);
 
     trackBidRate('opensea', taskId);
@@ -490,6 +524,8 @@ async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: 
 
 
   } catch (error: any) {
+    console.log({ submitOfferToOpensea: error, slug });
+
     if (error?.response?.data?.message?.errors?.[0] === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
       error?.message?.errors?.[0] === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
       error?.response?.data?.message === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
@@ -695,12 +731,17 @@ const getItemTokenConsideration = async (
   }
 }
 
+type OpenseaTopOffers = {
+  amount: number;
+  owner: string;
+}
+
 export async function fetchOpenseaOffers(
   offerType: 'COLLECTION' | 'TRAIT' | 'TOKEN',
   collectionSlug: string,
   contractAddress: string,
   identifiers: Record<string, string> | string
-) {
+): Promise<OpenseaTopOffers[]> {
   try {
     if (offerType === 'COLLECTION') {
       const url = `https://api.nfttools.website/opensea/api/v2/offers/collection/${collectionSlug}`;
@@ -712,18 +753,30 @@ export async function fetchOpenseaOffers(
       }));
 
       if (!data.offers?.length) {
-        return { amount: 0, owner: "" };
+        return [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
       }
 
-      const filteredOffers = data.offers
-        .sort((a: any, b: any) => +b.price.value - +a.price.value);
+      const topOffers = data.offers
+        .filter((data: any) => data.price.currency === "WETH" && data.criteria.trait === null)
+        .slice(0, 2)
+        .map((offer: any) => {
+          const quantity = offer.protocol_data.parameters.consideration.find((item: any) =>
+            item.token.toLowerCase() === contractAddress.toLowerCase()
+          ).startAmount;
+          return {
+            amount: Number(offer.price.value) / Number(quantity),
+            owner: offer.protocol_data.parameters.offerer
+          };
+        });
 
-      const bestOffer = filteredOffers[0];
-      const offers = bestOffer.price.value;
+      // Pad with empty offers if less than 2 offers exist
+      while (topOffers.length < 2) {
+        topOffers.push({ amount: 0, owner: "" });
+      }
 
-      const quantity = bestOffer.protocol_data.parameters.consideration.find((item: any) => item.token.toLowerCase() === contractAddress.toLowerCase()).startAmount;
+      console.log({ collectionSlug, topOffers });
 
-      return { amount: Number(offers) / Number(quantity), owner: bestOffer.protocol_data.parameters.offerer };
+      return topOffers;
 
     } else if (offerType === 'TRAIT') {
       const { type, value } = identifiers as Record<string, string>;
@@ -737,14 +790,28 @@ export async function fetchOpenseaOffers(
       }));
 
       if (!data.offers?.length) {
-        return { amount: 0, owner: "" };
+        return [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
       }
 
-      const bestOffer = data.offers
+      const topOffers = data.offers
         .filter((data: any) => data.price.currency === "WETH")
-        .sort((a: any, b: any) => +b.price.value - +a.price.value)[0]
+        .sort((a: any, b: any) => +b.price.value - +a.price.value)
+        .slice(0, 2)
+        .map((offer: any) => {
+          const quantity = offer.protocol_data?.parameters?.consideration?.find((item: any) =>
+            item?.token.toLowerCase() === contractAddress.toLowerCase()
+          ).startAmount ?? 1;
+          return {
+            amount: Number(offer.price.value) / quantity,
+            owner: offer.protocol_data.parameters.offerer
+          };
+        });
 
-      return { amount: bestOffer?.price?.value, owner: bestOffer?.protocol_data?.parameters?.offerer };
+      while (topOffers.length < 2) {
+        topOffers.push({ amount: 0, owner: "" });
+      }
+
+      return topOffers;
 
     } else if (offerType === 'TOKEN') {
       const token = identifiers as string;
@@ -754,15 +821,26 @@ export async function fetchOpenseaOffers(
           'accept': 'application/json',
           'X-NFT-API-Key': API_KEY
         }
-      }))
+      }));
 
-      if (!data) {
-        return { amount: 0, owner: "" };
+      // For token offers, we can only get the best offer from the API
+      const topOffers = [];
+
+      if (data) {
+        const quantity = data?.protocol_data?.parameters?.consideration?.find((item: any) =>
+          item?.token.toLowerCase() === contractAddress.toLowerCase()
+        ).startAmount ?? 1;
+        topOffers.push({
+          amount: Number(data.price.value) / quantity,
+          owner: data.protocol_data.parameters.offerer
+        });
       }
 
-      const quantity = data?.protocol_data?.parameters?.consideration?.find((item: any) => item?.token.toLowerCase() === contractAddress.toLowerCase()).startAmount ?? 1
+      while (topOffers.length < 2) {
+        topOffers.push({ amount: 0, owner: "" });
+      }
 
-      return { amount: Number(data?.price?.value) / Number(quantity), owner: data?.protocol_data?.parameters?.offerer };
+      return topOffers;
     } else {
       throw new Error("Invalid offer type");
     }
@@ -771,10 +849,9 @@ export async function fetchOpenseaOffers(
       error?.response?.data?.message?.errors && error.response.data.message.errors.length > 0
         ? error.response.data.message.errors[0]
         : JSON.stringify(error?.response?.data?.message) + RESET);
-    return { amount: 0, owner: "" };
+    return [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
   }
 }
-
 
 export async function fetchOpenseaListings(collectionSlug: string, limit?: number) {
   try {

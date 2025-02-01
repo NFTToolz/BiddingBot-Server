@@ -12,19 +12,16 @@ const MAX_CACHE_ITEMS = 1000;
 
 const lockManager = new DistributedLockManager({
   lockPrefix: '{collection}:fetch:',
-  defaultTTLSeconds: 30
+  defaultTTLSeconds: 36000
 });
 
 export async function getCollectionDetails(slug: string) {
-  // First check memory cache
+
   if (collectionCache[slug]) {
     return collectionCache[slug];
   }
-
-  // Try to get with lock
-  const lockKey = `collection:${slug}`;
+  const lockKey = `{${slug}}:collection`;
   const result = await lockManager.withLock(lockKey, async () => {
-    // Double-check cache after acquiring lock
     if (collectionCache[slug]) {
       return collectionCache[slug];
     }
@@ -40,7 +37,6 @@ export async function getCollectionDetails(slug: string) {
           }
         ));
 
-      // Add validation for collection data
       if (!collection || !collection.editors || !collection.contracts) {
         throw new Error('Invalid collection data received from API');
       }
@@ -71,13 +67,11 @@ export async function getCollectionDetails(slug: string) {
       collectionCache[slug] = result;
       return result;
     } catch (error: any) {
-      // Improved error logging
       console.error('Error fetching collection details:', {
         slug,
         error: error?.response?.data || error.message || error
       });
 
-      // Rethrow with a more specific message
       throw new Error(`Failed to fetch collection details for ${slug}: ${error?.response?.data?.message || error.message || 'Unknown error'}`);
     }
   });
@@ -90,35 +84,19 @@ export async function getCollectionDetails(slug: string) {
 }
 
 export async function getCollectionStats(collectionSlug: string) {
-  const cacheKey = `{collectionStats:${collectionSlug}}`;
-  const cachedData = await redis.get(cacheKey);
-  if (cachedData) {
-    return JSON.parse(cachedData);
-  }
-  const lockKey = `{collectionStats:${collectionSlug}}`;
-  const result = await lockManager.withLock<CollectionStats>(
-    lockKey,
-    async () => {
-      const cachedDataAfterLock = await redis.get(cacheKey);
-      if (cachedDataAfterLock) {
-        return JSON.parse(cachedDataAfterLock);
+  try {
+    const { data } = await limiter.schedule(() => axiosInstance.get<ListingsResponse>(
+      `https://api.nfttools.website/opensea/api/v2/listings/collection/${collectionSlug}/best`,
+      {
+        headers: { 'X-NFT-API-Key': API_KEY }
       }
-      const { data } = await limiter.schedule(() => axiosInstance.get<CollectionStats>(
-        `https://api.nfttools.website/opensea/api/v2/collections/${collectionSlug}/stats`,
-        {
-          headers: { 'X-NFT-API-Key': API_KEY }
-        }
-      ));
-
-      await redis.setex(cacheKey, 30, JSON.stringify(data));
-      return data;
-    },
-    30
-  );
-  if (!result) {
-    throw new Error('Failed to acquire lock for collection stats');
+    ));
+    const listings = data.listings.sort((a, b) => Number(a.price.current.value) - Number(b.price.current.value))
+    const floor_price = Number(listings[0].price.current.value) / 1e18
+    return floor_price;
+  } catch (error: any) {
+    console.error('Error fetching collection stats:', error?.response);
   }
-  return result;
 }
 
 export async function getCollectionEvents(
@@ -215,4 +193,63 @@ interface Criteria {
   };
   trait: null;
   encoded_token_ids: null;
+}
+
+interface Price {
+  current: {
+    currency: string;
+    decimals: number;
+    value: string;
+  }
+}
+
+interface OfferItem {
+  itemType: number;
+  token: string;
+  identifierOrCriteria: string;
+  startAmount: string;
+  endAmount: string;
+}
+
+interface ConsiderationItem {
+  itemType: number;
+  token: string;
+  identifierOrCriteria: string;
+  startAmount: string;
+  endAmount: string;
+  recipient: string;
+}
+
+interface ProtocolParameters {
+  offerer: string;
+  offer: OfferItem[];
+  consideration: ConsiderationItem[];
+  startTime: string;
+  endTime: string;
+  orderType: number;
+  zone: string;
+  zoneHash: string;
+  salt: string;
+  conduitKey: string;
+  totalOriginalConsiderationItems: number;
+  counter: string | number;
+}
+
+interface ProtocolData {
+  parameters: ProtocolParameters;
+  signature: string | null;
+}
+
+interface Listing {
+  order_hash: string;
+  chain: string;
+  type: string;
+  price: Price;
+  protocol_data: ProtocolData;
+  protocol_address: string;
+}
+
+interface ListingsResponse {
+  listings: Listing[];
+  next: string;
 }
