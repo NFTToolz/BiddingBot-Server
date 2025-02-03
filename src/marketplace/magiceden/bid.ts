@@ -52,7 +52,6 @@ export async function bidOnMagiceden(
   tokenId?: string | number
 ) {
   try {
-
     const task = currentTasks.find((task) => task.contract.slug.toLowerCase() === slug.toLowerCase() && task.selectedMarketplaces.includes("MagicEden"))
     if (!task) return
 
@@ -542,7 +541,7 @@ async function signCancelOrder(cancelItem: any | undefined, privateKey: string) 
   }
 }
 
-export async function fetchMagicEdenOffer(type: "COLLECTION" | "TRAIT" | "TOKEN", walletAddress: string, contractAddress: string, identifier?: string | Record<string, string>) {
+export async function fetchMagicEdenOffer(type: "COLLECTION" | "TRAIT" | "TOKEN", contractAddress: string, identifier?: string | Record<string, string>) {
   try {
     const URL = `https://api.nfttools.website/magiceden/v3/rtp/ethereum/orders/bids/v6`;
     if (type === "COLLECTION") {
@@ -553,7 +552,7 @@ export async function fetchMagicEdenOffer(type: "COLLECTION" | "TRAIT" | "TOKEN"
         excludeEOA: 'false',
         includeCriteriaMetadata: 'true',
         includeDepth: 'true',
-        normalizeRoyalties: 'false'
+        normalizeRoyalties: 'false',
       }
 
       const { data } = await limiter.schedule(() =>
@@ -566,9 +565,11 @@ export async function fetchMagicEdenOffer(type: "COLLECTION" | "TRAIT" | "TOKEN"
         })
       );
 
-      const offer = data?.orders[0]
-      if (!offer) return { amount: "0", owner: "" }
-      return { amount: offer.price.amount.raw, owner: offer.maker }
+      const offers = data?.orders
+        ?.sort((a, b) => Number(b.price.amount.raw) - Number(a.price.amount.raw))
+        ?.slice(0, 2) || []
+      if (!offers.length) return [{ amount: "0", owner: "" }]
+      return offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker }))
 
     } else if (type === "TOKEN") {
       const queryParams = {
@@ -577,7 +578,7 @@ export async function fetchMagicEdenOffer(type: "COLLECTION" | "TRAIT" | "TOKEN"
         status: 'active',
         excludeEOA: 'false',
         limit: '100',
-        normalizeRoyalties: 'false'
+        normalizeRoyalties: 'false',
       };
       const { data } = await limiter.schedule(() =>
         axiosInstance.get<MagicEdenTokenResponse>(URL, {
@@ -589,9 +590,11 @@ export async function fetchMagicEdenOffer(type: "COLLECTION" | "TRAIT" | "TOKEN"
         })
       );
 
-      const offer = data?.orders?.filter((data) => data.price.currency.symbol === "WETH")
-      if (!offer?.length) return { amount: "0", owner: "" }
-      return { amount: offer[0].price.amount.raw || "0", owner: offer[0].maker }
+      const offers = data?.orders?.filter((data) => data.price.currency.symbol === "WETH").slice(0, 2)
+      if (!offers?.length) return [{ amount: "0", owner: "" }]
+
+      console.log({ tokenId: identifier, offers: offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker })) });
+      return offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker }))
 
     } else if (type === "TRAIT") {
       interface TraitQueryParams {
@@ -619,46 +622,83 @@ export async function fetchMagicEdenOffer(type: "COLLECTION" | "TRAIT" | "TOKEN"
           }
         }
       ));
-      const orders = data?.orders?.filter(data => data.price.currency.symbol === "WETH")[0]
-      if (!orders) return { amount: "0", owner: "" }
-      return { amount: orders.price.amount.raw, owner: orders.maker }
+      const offers = data?.orders?.filter(data => data.price.currency.symbol === "WETH").slice(0, 2)
+      if (!offers?.length) return [{ amount: "0", owner: "" }]
+
+      console.log({ traits: identifier, offers: offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker })) });
+
+      return offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker }))
     }
-    return { amount: "0", owner: "" }
+    return [{ amount: "0", owner: "" }]
   } catch (error: any) {
+    console.log("fetchMagicEdenOffer: ", error?.response?.data);
     throw error
   }
 }
 
 
+async function fetchMagicEdenTokensV7(collectionAddress: string) {
+  try {
+    const queryParams = {
+      includeQuantity: true,
+      includeLastSale: true,
+      excludeSpam: true,
+      excludeBurnt: true,
+      collection: collectionAddress,
+      sortBy: 'floorAskPrice',
+      sortDirection: 'asc',
+      limit: 50,
+      includeAttributes: false,
+      source: ['magiceden.io', 'magiceden.us']
+    };
+
+    const { data } = await limiter.schedule(() =>
+      axiosInstance.get('https://api.nfttools.website/magiceden/v3/rtp/ethereum/tokens/v7', {
+        params: queryParams,
+        headers: {
+          'X-NFT-API-Key': API_KEY
+        }
+      })
+    );
+
+    return data;
+  } catch (error) {
+    console.error('Error fetching Magic Eden tokens v7:', error);
+    throw error;
+  }
+}
+
+
 export async function fetchMagicEdenCollectionStats(contractAddress: string) {
-  const lockKey = `stats: ${contractAddress}`;
+  const queryParams = {
+    includeQuantity: true,
+    includeLastSale: true,
+    excludeSpam: true,
+    excludeBurnt: true,
+    collection: contractAddress,
+    sortBy: 'floorAskPrice',
+    sortDirection: 'asc',
+    limit: 50,
+    includeAttributes: false,
+    // source: ['magiceden.io', 'magiceden.us']
+  };
 
-  return await lockManager.withLock(
-    lockKey,
-    async () => {
-      const queryParams = {
-        chain: 'ethereum',
-        collectionId: contractAddress
-      };
-      try {
-        const { data } = await limiter.schedule(() => axiosInstance.get(
-          'https://api.nfttools.website/magiceden_stats/collection_stats/stats',
-          {
-            params: queryParams,
-            headers: {
-              'X-NFT-API-Key': API_KEY
-            }
-          }
-        ));
+  try {
+    const { data } = await limiter.schedule(() =>
+      axiosInstance.get('https://api.nfttools.website/magiceden/v3/rtp/ethereum/tokens/v7', {
+        params: queryParams,
+        headers: {
+          'X-NFT-API-Key': API_KEY
+        }
+      })
+    );
 
-        return +data?.floorPrice?.amount || 0
-      } catch (error) {
-        console.error('Error fetching Magic Eden collection stats:', error);
-        return 0
-      }
-    },
-    15 // Lock TTL in seconds
-  );
+    const token: TokenData = data?.tokens.filter((token: TokenData) => token.market.floorAsk.price.currency.symbol.toLowerCase() === "weth" || token.market.floorAsk.price.currency.symbol.toLowerCase())[0]
+    return token.market.floorAsk.price.amount.decimal
+  } catch (error) {
+    console.error('Error fetching Magic Eden collection stats:', error);
+    return 0
+  }
 }
 
 export async function fetchMagicEdenTokens(collectionId: string, limit?: number) {
@@ -1343,4 +1383,122 @@ interface MagicEdenTraitOfferOrder {
   updatedAt: string;
   originatedAt: string | null;
   isNativeOffChainCancellable: boolean;
+}
+
+interface Currency {
+  contract: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+}
+
+interface PriceAmount {
+  raw: string;
+  decimal: number;
+  usd: number;
+  native: number;
+}
+
+interface Price {
+  currency: Currency;
+  amount: PriceAmount;
+}
+
+interface FeeBreakdown {
+  kind: 'royalty' | 'marketplace';
+  bps: number;
+  recipient: string;
+  rawAmount: string;
+  source?: string;
+}
+
+interface LastSale {
+  orderSource: string;
+  fillSource: string;
+  timestamp: number;
+  price: {
+    currency: Currency;
+    amount: PriceAmount;
+    netAmount: PriceAmount;
+  };
+  royaltyFeeBps: number;
+  marketplaceFeeBps: number;
+  paidFullRoyalty: boolean;
+  feeBreakdown: FeeBreakdown[];
+}
+
+interface Collection {
+  id: string;
+  name: string;
+  image: string;
+  slug: string;
+  symbol: string;
+  creator: string;
+  tokenCount: number;
+  metadataDisabled: boolean;
+  floorAskPrice: Price;
+}
+
+interface Token {
+  chainId: number;
+  contract: string;
+  tokenId: string;
+  name: string;
+  description: string;
+  image: string;
+  imageSmall: string;
+  imageLarge: string;
+  media: null;
+  kind: string;
+  isFlagged: boolean;
+  isSpam: boolean;
+  isNsfw: boolean;
+  metadataDisabled: boolean;
+  lastFlagUpdate: string;
+  lastFlagChange: null;
+  supply: string;
+  remainingSupply: string;
+  rarity: number;
+  rarityRank: number;
+  collection: Collection;
+  lastSale: LastSale;
+  owner: string;
+  mintedAt: string;
+  createdAt: string;
+  decimals: null;
+  mintStages: any[];
+}
+
+interface Source {
+  id: string;
+  domain: string;
+  name: string;
+  icon: string;
+  url: string;
+}
+
+interface FloorAsk {
+  id: string;
+  price: Price;
+  maker: string;
+  validFrom: number;
+  validUntil: number;
+  quantityFilled: string;
+  quantityRemaining: string;
+  source: Source;
+}
+
+interface Market {
+  floorAsk: FloorAsk;
+}
+
+interface Media {
+  image: string;
+}
+
+interface TokenData {
+  token: Token;
+  market: Market;
+  updatedAt: string;
+  media: Media;
 }

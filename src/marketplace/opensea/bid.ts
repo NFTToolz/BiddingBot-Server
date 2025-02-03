@@ -235,18 +235,6 @@ export async function bidOnOpensea(
 
   const offerPrice = BigNumber.from(roundedWei.toString());
   const offerPriceEthFinal = Number(roundedWei) / 1e18;
-
-
-
-  console.log({
-    originalPrice: `${offerPriceEth} ETH`,
-    roundedPrice: `${offerPriceEthFinal} ETH`,
-    decimalsUsed: decimals,
-    roundedWei,
-    offerPrice: offerPrice.toString(),
-    slug
-  });
-
   const leverage = 50;
   const wethBalance = await balanceChecker.getWethBalance(wallet_address);
 
@@ -752,6 +740,8 @@ export async function fetchOpenseaOffers(
         }
       }));
 
+
+
       if (!data.offers?.length) {
         return [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
       }
@@ -773,8 +763,6 @@ export async function fetchOpenseaOffers(
       while (topOffers.length < 2) {
         topOffers.push({ amount: 0, owner: "" });
       }
-
-      console.log({ collectionSlug, topOffers });
 
       return topOffers;
 
@@ -812,27 +800,35 @@ export async function fetchOpenseaOffers(
       }
 
       return topOffers;
-
     } else if (offerType === 'TOKEN') {
       const token = identifiers as string;
-      const url = `https://api.nfttools.website/opensea/api/v2/offers/collection/${collectionSlug}/nfts/${token}/best`;
+      const url = `https://api.nfttools.website/opensea/api/v2/orders/ethereum/seaport/offers`;
+      const params = {
+        asset_contract_address: contractAddress,
+        token_ids: token,
+        order_by: 'eth_price',
+        order_direction: 'desc'
+      };
+
       const { data } = await limiter.schedule(() => axiosInstance.get(url, {
         headers: {
           'accept': 'application/json',
           'X-NFT-API-Key': API_KEY
-        }
+        },
+        params
       }));
 
-      // For token offers, we can only get the best offer from the API
       const topOffers = [];
 
-      if (data) {
-        const quantity = data?.protocol_data?.parameters?.consideration?.find((item: any) =>
+      for (let i = 0; i < 2 && i < (data?.orders?.length || 0); i++) {
+        const offer = data.orders[i];
+        const quantity = offer?.protocol_data?.parameters?.consideration?.find((item: any) =>
           item?.token.toLowerCase() === contractAddress.toLowerCase()
-        ).startAmount ?? 1;
+        )?.startAmount ?? 1;
+
         topOffers.push({
-          amount: Number(data.price.value) / quantity,
-          owner: data.protocol_data.parameters.offerer
+          amount: Number(offer.current_price) / quantity,
+          owner: offer.protocol_data.parameters.offerer
         });
       }
 
