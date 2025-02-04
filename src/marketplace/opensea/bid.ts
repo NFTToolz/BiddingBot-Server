@@ -741,7 +741,6 @@ export async function fetchOpenseaOffers(
       }));
 
 
-
       if (!data.offers?.length) {
         return [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
       }

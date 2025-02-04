@@ -2984,10 +2984,9 @@ async function handleBlurCounterbid(data: any, task: ITask) {
 
     const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, Number(floor_price), "blur")
     const selectedTraits = transformNewTask(task.selectedTraits)
-
     const traitBid = task.bidType === "collection" && selectedTraits && Object.keys(selectedTraits).length > 0
-
     const blurOutbidMargin = task.outbidOptions.blurOutbidMargin || 0.01
+    const bestOffer = bestOffers[task._id]?.blur || 0
 
     if (traitBid) {
       const traits = transformBlurTraits(selectedTraits)
@@ -2998,6 +2997,9 @@ async function handleBlurCounterbid(data: any, task: ITask) {
       for (const traitBid of hasMatchingTraits) {
         const trait = JSON.stringify(traitBid.criteriaValue)
         const incomingPrice = Number(traitBid.bestPrice)
+
+        if (incomingPrice < bestOffer) return
+
         console.log(GOLD + '---------------------------------------------------------------------------------' + RESET);
         console.log(GOLD + `incoming trait offer for ${task.contract.slug}: ${trait} for ${incomingPrice} BETH on blur`.toUpperCase() + RESET);
         console.log(GOLD + '---------------------------------------------------------------------------------' + RESET);
@@ -3014,7 +3016,9 @@ async function handleBlurCounterbid(data: any, task: ITask) {
           return parsed.offer
         })
         const currentBidPrice = !offers.length ? 0 : Math.max(...offers.map((offer) => Number(offer)))
-        if (incomingPrice <= currentBidPrice) return
+        const currentBidPriceEth = currentBidPrice / 1e18
+        
+        if (incomingPrice <= currentBidPriceEth) return
 
         let offerPrice: any = Number((blurOutbidMargin + Number(incomingPrice)).toFixed(2))
         offerPrice = BigNumber.from(utils.parseEther(offerPrice.toString()).toString())
@@ -3453,7 +3457,7 @@ async function processOpenseaScheduledBid(task: ITask) {
           const spread = (Number(topOffer.amount) - Number(secondOffer.amount)) / 1e18;
 
           // Check for overbidding
-          if (spread > outbidMargin) {
+          if (spread > outbidMargin && Number(secondOffer.amount) > 0) {
             console.log(YELLOW + `Canceling overbid orders for ${task.contract.slug} - spread of ${spread} ETH exceeds margin` + RESET);
             if (orderKeys.length > 0) {
               const bidData = await redis.mget(orderKeys);
@@ -3644,6 +3648,7 @@ async function processBlurScheduledBid(task: ITask) {
       let colletionOffer = BigInt(offerPrice)
       const orderTrackingKey = `{${task._id}}:blur:orders`;
       const orderKeys = await getPatternKeys(orderTrackingKey, 'collection') || []
+
       const [orderKey] = orderKeys
       const ttl = await redis.ttl(orderKey)
 
@@ -3658,9 +3663,10 @@ async function processBlurScheduledBid(task: ITask) {
       }
       else {
         const highestBid = await marketDataPromise;
-        const highestBidAmount = highestBid?.priceLevels?.[0]?.price ? Number(highestBid.priceLevels[0].price) * 1e18 : 0
+        const [topOffer, secondOffer] = highestBid?.priceLevels?.sort((a, b) => +b.price - +a.price) || [{ price: "0" }, { price: "0" }];
+        const topOfferAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.price) : 0
+        const secondOfferAmount = typeof secondOffer === 'object' && secondOffer ? Number(secondOffer.price) : 0
         const orderData = orderKeys.length > 0 ? await redis.mget(orderKeys) : []
-
         const offers = orderData.map((order) => {
           if (!order) return
           const parsed = JSON.parse(order);
@@ -3669,37 +3675,61 @@ async function processBlurScheduledBid(task: ITask) {
 
         const currentBidPrice = !offers.length ? 0 : Math.max(...offers.map((offer) => Number(offer)))
         const currentBidPriceEth = Number((currentBidPrice / 1e18).toFixed(2));
-        const offerPriceEth = Number((Number(colletionOffer) / 1e18).toFixed(2));
-        // If there's a highest bid amount in the market
-        if (highestBidAmount) {
-          const highestBidAmountEth = Number((highestBidAmount / 1e18).toFixed(2));
+        const bidderAddressesSample = topOffer?.bidderAddressesSample || []
+        const executableSize = topOffer?.executableSize || 0
+        const isTopBid = currentBidPriceEth === topOfferAmount && executableSize === 1 && bidderAddressesSample
+          .map((address) => address.toLowerCase())
+          .includes(WALLET_ADDRESS.toLowerCase())
+        const blurOutbidMargin = task.outbidOptions.blurOutbidMargin || 0.01
 
-          // Condition 1: If current bid equals highest bid, do nothing
-          if (highestBidAmountEth === currentBidPriceEth) {
-            if (ttl >= MIN_BID_DURATION) {
+        // First check if we already have the top bid
+        if (isTopBid) {
+          // Check if our current bid has enough spread from second offer
+          const spread = Number((currentBidPriceEth - secondOfferAmount).toFixed(2));
+
+          if (spread > blurOutbidMargin && Number(secondOfferAmount) > 0) {
+            // We're overbidding by too much, reduce our bid
+            console.log(RED + `Canceling overbid orders for ${task.contract.slug} - spread of ${spread} ETH exceeds margin`.toUpperCase() + RESET);
+            if (orderKeys.length > 0) {
+              // Cancel existing bids
+              const orderData = await redis.mget(orderKeys);
+              const cancelData = orderData.map((orderKey, index) => {
+                if (!orderKey) return
+                const order = JSON.parse(orderKey);
+                const payload = order.payload;
+                return {
+                  name: CANCEL_BLUR_BID,
+                  data: { privateKey: task.wallet.privateKey, payload, taskId: task._id, orderKey: orderKeys[index] }
+                }
+              });
+              await processBulkJobs(cancelData);
+            }
+            // Place new bid just above second offer
+            colletionOffer = BigInt((secondOfferAmount + blurOutbidMargin) * 1e18);
+          } else if (ttl > MIN_BID_DURATION) {
+            // Our bid is good and not close to expiry
+            return;
+          }
+        } else {
+          // We need to outbid the current top offer
+          const newBidPrice = topOfferAmount + blurOutbidMargin;
+
+          // Check if new bid would be within our limits
+          if (newBidPrice <= maxBidPriceEth && newBidPrice >= minBidPriceEth) {
+            colletionOffer = BigInt(newBidPrice * 1e18);
+          }
+          else if (newBidPrice > maxBidPriceEth) {
+            if (maxBidPriceEth === topOfferAmount && topOfferAmount === currentBidPriceEth && ttl > MIN_BID_DURATION) {
               return;
             }
-
-            colletionOffer = BigInt(highestBidAmountEth * 1e18)
-          }
-
-          // Condition 1.5: If offer price equals highest bid
-          else if (offerPriceEth === highestBidAmountEth) {
-            colletionOffer = BigInt(highestBidAmountEth * 1e18)
-          }
-          // Condition 2: If highest bid equals max bid price, set offer to max bid
-          else if (highestBidAmountEth.toFixed(2) === maxBidPriceEth.toFixed(2)) {
-            colletionOffer = BigInt((Number(maxBidPriceEth.toFixed(2)) * 1e18))
-          }
-          // Condition 3: If highest bid is greater than current bid
-          else if (highestBidAmountEth > currentBidPriceEth) {
-            const outbidMargin = (task.outbidOptions.blurOutbidMargin || 0.01) * 1e18
-            colletionOffer = BigInt(highestBidAmount + outbidMargin)
-            const offerPriceEth = Number((Number(colletionOffer) / 1e18).toFixed(2));
-
-            if (offerPriceEth < minBidPriceEth) {
-              colletionOffer = BigInt((minBidPriceEth * 1e18))
-            } else if (offerPriceEth > maxBidPriceEth) {
+            else if (ttl <= MIN_BID_DURATION && currentBidPriceEth === topOfferAmount) {
+              colletionOffer = BigInt(currentBidPriceEth * 1e18);
+            }
+            else if (maxBidPriceEth === topOfferAmount && currentBidPriceEth < topOfferAmount) {
+              colletionOffer = BigInt(maxBidPriceEth * 1e18);
+            }
+            else {
+              // Would exceed max bid price
               if (!skipStats[task._id]) {
                 skipStats[task._id] = {
                   opensea: 0,
@@ -3709,31 +3739,40 @@ async function processBlurScheduledBid(task: ITask) {
               }
               skipStats[task._id]['blur']++;
               console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-              console.log(RED + `❌ Offer price ${offerPriceEth} BETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} BETH FOR BLUR.Skipping ...`.toUpperCase() + RESET);
+              console.log(RED + `❌ Required offer price ${newBidPrice} BETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} BETH FOR BLUR.Skipping ...`.toUpperCase() + RESET);
               console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+
+              // Cancel existing bids since we can't compete
               if (orderKeys.length > 0) {
                 const orderData = await redis.mget(orderKeys);
                 const cancelData = orderData.map((orderKey, index) => {
                   if (!orderKey) return
                   const order = JSON.parse(orderKey);
-                  const payload = order.payload
-
+                  const payload = order.payload;
                   return {
                     name: CANCEL_BLUR_BID,
                     data: { privateKey: task.wallet.privateKey, payload, taskId: task._id, orderKey: orderKeys[index] }
                   }
-                })
+                });
                 await processBulkJobs(cancelData);
               }
               return;
-            } else if (offerPriceEth < maxBidPriceEth) {
-              colletionOffer = BigInt((Number(offerPriceEth.toFixed(2)) * 1e18))
+
             }
+
+          } else {
+            // Would be below minimum bid price
+            colletionOffer = BigInt(minBidPriceEth * 1e18);
           }
-        } else {
-          colletionOffer = BigInt((Number(minBidPriceEth.toFixed(2)) * 1e18))
         }
       }
+
+      const offerPriceEth = Number((Number(colletionOffer) / 1e18).toFixed(2));
+
+      if (offerPriceEth < minBidPriceEth) {
+        colletionOffer = BigInt((minBidPriceEth * 1e18))
+      }
+
       const bidCount = getIncrementedBidCount(BLUR, task.contract.slug, task._id)
       if (orderKeys.length > 0) {
         const orderData = await redis.mget(orderKeys);
@@ -3801,7 +3840,7 @@ async function processOpenseaTraitBid(data: {
     }
     else {
       const highestBid = await marketDataPromise;
-      const [topOffer, secondOffer] = highestBid || [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
+      const [topOffer, secondOffer] = highestBid || [{ amount: 0, owner: "" }, { amount: 0 }];
       const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(highestBid);
       const bestOfferWei = bestOffer * 1e18;
 
@@ -3810,12 +3849,12 @@ async function processOpenseaTraitBid(data: {
       const owner = topOffer && typeof topOffer === 'object' ? topOffer.owner?.toLowerCase() : '';
       const isOwnBid = walletsArr
         .map(addr => addr.toLowerCase())
-        .includes(owner);
+        .includes(owner as string);
       const secondOwner = secondOffer?.owner;
 
       const isOwnSecondBid = walletsArr
         .map(addr => addr.toLowerCase())
-        .includes(secondOwner);
+        .includes(secondOwner as string);
 
       const topOfferEth = Number(absoluteHighestBidAmount) / 1e18;
 
@@ -3832,7 +3871,7 @@ async function processOpenseaTraitBid(data: {
       else if (isOwnBid) {
         const absoluteSecondBidAmount = Math.max(Number(secondOffer.amount), Number(bestOfferWei));
         const spread = (Number(highestBidAmount) - Number(absoluteSecondBidAmount)) / 1e18;
-        if (spread > outbidMargin) {
+        if (spread > outbidMargin && Number(secondOffer.amount) > 0) {
           console.log(YELLOW + `Canceling overbid orders for ${slug} ${trait} - spread of ${spread} ETH exceeds margin` + RESET);
 
           if (orderKeys.length > 0) {
@@ -3984,7 +4023,7 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
         const absoluteSecondBidAmount = Math.max(Number(secondOffer.amount), Number(bestOfferWei));
         const spread = (Number(highestBidAmount) - Number(absoluteSecondBidAmount)) / 1e18;
 
-        if (spread > outbidMargin) {
+        if (spread > outbidMargin && Number(secondOffer.amount) > 0) {
           console.log(YELLOW + `Canceling overbid orders for ${slug} ${asset.tokenId} - spread of ${spread} ETH exceeds margin` + RESET);
 
           if (orderKeys.length > 0) {
@@ -4308,13 +4347,15 @@ async function processBlurTraitBid(data: {
   minBidPriceEth: number
 }) {
   const { address, privateKey, contractAddress, offerPrice, slug, trait, expiry, outbidOptions, maxBidPriceEth, _id, minBidPriceEth } = data;
-  let collectionOffer = BigInt(Math.round(Number(offerPrice) / 1e16) * 1e16);
+  let traitOffer = BigInt(Math.round(Number(offerPrice) / 1e16) * 1e16);
   const traitsObj = JSON.parse(trait);
   const [traitType, traitValue] = Object.entries(traitsObj)[0];
   const identifier = `${traitType}:${traitValue}`
   const orderTrackingKey = `{${_id}}:blur:orders`;
   const currentTask = activeTasks.get(_id)
   if (!currentTask?.running || !currentTask.selectedMarketplaces.map((market) => market.toLowerCase()).includes("blur")) return
+
+  const bestOffer = bestOffers[_id].blur
 
   try {
     const orderKeys = await getPatternKeys(orderTrackingKey, identifier) || []
@@ -4324,60 +4365,85 @@ async function processBlurTraitBid(data: {
       if (ttl >= MIN_BID_DURATION) return;
     }
     else {
-      const outbidMargin = outbidOptions.blurOutbidMargin || 0.01;
       const bids = await fetchBlurBid(slug, "TRAIT", JSON.parse(trait));
-      const highestBids = bids?.priceLevels?.length ? bids.priceLevels.sort((a, b) => +b.price - +a.price)[0].price : 0;
-
+      const [topOffer, secondOffer] = bids?.priceLevels?.sort((a, b) => +b.price - +a.price) || [{ price: "0" }, { price: "0" }];
+      const topOfferAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.price) : 0
+      const secondOfferAmount = typeof secondOffer === 'object' && secondOffer ? Number(secondOffer.price) : 0
       const orderTrackingKey = `{${_id}}:blur:orders`;
       const orderKeys = await getPatternKeys(orderTrackingKey, identifier) || []
       const orderData = orderKeys.length ? await redis.mget(orderKeys) : []
       const offers = orderData.map((order: any) => {
-        if (order.offer) return
+        if (!order) return 0
         const parsed = JSON.parse(order)
-        return parsed.offer
-      })
+        return Number(parsed.offer) || 0
+      }).filter(Boolean)
 
-      const currentBidPrice = !offers.length ? 0 : Math.max(...offers.map((offer) => Number(offer)))
-      if (Number(highestBids) * 1e18 <= currentBidPrice) {
-        if (ttl >= MIN_BID_DURATION) return;
-      }
-      const bidPrice = Number(highestBids) + outbidMargin;
-      collectionOffer = BigInt(Math.ceil(bidPrice * 1e18));
-    }
-    const offerPriceEth = Number(collectionOffer) / 1e18;
+      const currentBidPrice = !offers.length ? 0 : Math.max(...offers)
+      const currentBidPriceEth = Number((currentBidPrice / 1e18).toFixed(2));
+      const bidderAddressesSample = topOffer?.bidderAddressesSample || []
+      const executableSize = topOffer?.executableSize || 0
 
-    if (offerPriceEth < minBidPriceEth) {
-      collectionOffer = BigInt((minBidPriceEth * 1e18))
-    }
+      const absoluteBestOffer = Math.max(bestOffer, topOfferAmount)
+      const blurOutbidMargin = outbidOptions.blurOutbidMargin || 0.01
 
-    if (outbidOptions.outbid && maxBidPriceEth > 0 && offerPriceEth > maxBidPriceEth) {
-      if (!skipStats[_id]) {
-        skipStats[_id] = {
-          opensea: 0,
-          magiceden: 0,
-          blur: 0
-        };
-      }
-      skipStats[_id]['blur']++;
-      console.log(RED + '--------------------------------------------------------------------------------------------------' + RESET);
-      console.log(RED + `Offer price ${offerPriceEth} ETH for ${slug} trait ${trait} exceeds max bid price ${maxBidPriceEth} ETH.Skipping ...`.toUpperCase() + RESET);
-      console.log(RED + '--------------------------------------------------------------------------------------------------' + RESET);
-      if (orderKeys.length > 0) {
-        const orderData = await redis.mget(orderKeys);
-        const cancelData = orderData.map((orderKey, index) => {
-          if (!orderKey) return
-          const order = JSON.parse(orderKey);
-          const payload = order.payload
+      const isTopBid = currentBidPriceEth === absoluteBestOffer && executableSize === 1 && bidderAddressesSample
+        .map((address) => address.toLowerCase())
+        .includes(address.toLowerCase())
 
-          return {
-            name: CANCEL_BLUR_BID,
-            data: { privateKey: privateKey, payload, taskId: _id, orderKey: orderKeys[index] }
+      if (absoluteBestOffer === 0) {
+        // No existing offers - start at minimum bid price
+        traitOffer = BigInt(Math.ceil(minBidPriceEth * 1e18));
+      } else if (isTopBid) {
+        // We have the top bid
+        const spread = Number((currentBidPriceEth - secondOfferAmount).toFixed(2));
+        if (spread > blurOutbidMargin && secondOfferAmount > 0) {
+          // We're overbidding by too much - reduce to just above second offer
+          console.log(RED + `Canceling overbid orders for ${slug} - spread of ${spread} ETH exceeds margin`.toUpperCase() + RESET);
+          await cancelExistingOrders(orderKeys, privateKey, _id);
+          traitOffer = BigInt(Math.ceil((secondOfferAmount + blurOutbidMargin) * 1e18));
+        } else if (ttl > MIN_BID_DURATION) {
+          // Our current bid is good and not close to expiry
+          return;
+        } else {
+          // Maintain our current bid price
+          traitOffer = BigInt(currentBidPrice);
+        }
+      } else {
+        // We need to outbid the current top offer
+        const newBidPrice = absoluteBestOffer + blurOutbidMargin;
+
+        if (absoluteBestOffer === maxBidPriceEth) {
+          // Match the max bid price if that's the current top offer
+          traitOffer = BigInt(Math.ceil(maxBidPriceEth * 1e18));
+        } else if (absoluteBestOffer < maxBidPriceEth) {
+          // Outbid if the current offer is below our max
+          if (newBidPrice <= maxBidPriceEth) {
+            traitOffer = BigInt(Math.ceil(newBidPrice * 1e18));
+          } else {
+            // If outbidding would exceed max, bid at max
+            traitOffer = BigInt(Math.ceil(maxBidPriceEth * 1e18));
           }
-        })
-        await processBulkJobs(cancelData);
+        } else {
+          // Cancel existing bids since we can't compete at this price
+          logSkipAndCancel(skipStats, _id, slug, trait, newBidPrice, maxBidPriceEth, orderKeys, privateKey);
+          return;
+        }
+
+        // Ensure we meet minimum bid price
+        if (Number(traitOffer) / 1e18 < minBidPriceEth) {
+          traitOffer = BigInt(Math.ceil(minBidPriceEth * 1e18));
+        }
       }
-      return;
     }
+    const offerPriceEth = Number((Number(traitOffer) / 1e18).toFixed(2));
+
+    const absoluteBestOffer = Math.max(bestOffer, minBidPriceEth)
+
+    if (offerPriceEth < absoluteBestOffer) {
+      traitOffer = BigInt((absoluteBestOffer * 1e18))
+    }
+
+
     const bidCount = getIncrementedBidCount(BLUR, slug, _id)
     if (orderKeys.length > 0) {
       const orderData = await redis.mget(orderKeys);
@@ -4391,9 +4457,9 @@ async function processBlurTraitBid(data: {
           data: { privateKey, payload, taskId: _id, orderKey: orderKeys[index] }
         }
       })
-      await processBulkJobs(cancelData)
+      await processBulkJobs(cancelData);
     }
-    await bidOnBlur(_id, bidCount, address, privateKey, contractAddress, collectionOffer, slug, expiry, trait);
+    await bidOnBlur(_id, bidCount, address, privateKey, contractAddress, traitOffer, slug, expiry, trait);
   } catch (error) {
     console.error(RED + `Error processing Blur trait bid for task: ${data?.slug} ` + RESET, error);
   }
@@ -4582,7 +4648,7 @@ async function processMagicedenScheduledBid(task: ITask) {
         else if (isOwnBid) {
           const spread = (Number(highestBid.amount) - Number(secondBestOffer.amount)) / 1e18;
 
-          if (spread > outbidMargin) {
+          if (spread > outbidMargin && Number(secondBestOffer.amount) > 0) {
             console.log(YELLOW + `Canceling overbid orders for ${task.contract.slug} - spread of ${spread} ETH exceeds margin` + RESET);
             if (orderKeys.length > 0) {
               const extractedOrderIds = await extractMagicedenOrderHash(orderKeys)
@@ -4708,7 +4774,7 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
         const absoluteSecondBidAmount = Math.max(Number(secondOffer.amount), Number(bestOfferWei));
         const spread = (Number(highestBidAmount) - Number(absoluteSecondBidAmount)) / 1e18;
 
-        if (spread > outbidMargin) {
+        if (spread > outbidMargin && Number(secondOffer.amount) > 0) {
           console.log(YELLOW + `Canceling overbid orders for ${slug} ${tokenId} - spread of ${spread} ETH exceeds margin` + RESET);
 
           if (orderKeys.length > 0) {
@@ -4748,7 +4814,7 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
 
           skipStats[_id]['magiceden']++;
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-          console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${slug} token ${tokenId} exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase() + RESET);
+          console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${slug} ${tokenId} exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase() + RESET);
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
           if (orderKeys.length > 0) {
@@ -4876,7 +4942,7 @@ async function processMagicedenTraitBid(data: {
         const absoluteSecondBidAmount = Math.max(Number(secondBestOffer.amount), Number(bestOfferWei));
         const spread = (Number(highestBidAmount) - Number(absoluteSecondBidAmount)) / 1e18;
 
-        if (spread > outbidMargin) {
+        if (spread > outbidMargin && Number(secondBestOffer.amount) > 0) {
           console.log(YELLOW + `Canceling overbid orders for ${slug} ${trait} - spread of ${spread} ETH exceeds margin` + RESET);
           if (orderKeys.length > 0) {
             const extractedOrderIds = await extractMagicedenOrderHash(orderKeys)
@@ -5095,6 +5161,12 @@ function calculateBidPrice(task: ITask, floorPrice: number, marketplaceName: "op
     throw new Error(`Invalid bid price configuration: Minimum bid price (${minBidPriceEth} ETH) cannot be greater than maximum bid price (${maxBidPriceEth} ETH)`);
   }
 
+
+  if (marketplaceName.toLowerCase() === "blur") {
+    offerPriceEth = Math.floor(offerPriceEth * 100) / 100;
+    maxBidPriceEth = Math.floor(maxBidPriceEth * 100) / 100;
+    minBidPriceEth = Math.floor(minBidPriceEth * 100) / 100;
+  }
   return { offerPriceEth, maxBidPriceEth, minBidPriceEth };
 }
 
@@ -5214,7 +5286,42 @@ function subscribeToCollections(tasks: ITask[]) {
         console.log('----------------------------------------------------------------------');
       }
 
-      // Similar changes for MagicEden and Blur subscriptions...
+      const connectToMagiceden = task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("magiceden");
+      if (connectToMagiceden) {
+        const magicedenSubscriptionMessage = {
+          "slug": task.contract.slug,
+          "event": "join_the_party",
+          "topic": task.contract.slug,
+          "contractAddress": task.contract.contractAddress,
+          "clientId": clientId,
+          "marketplace": MAGICEDEN
+        };
+
+        safeSendMessage(magicedenSubscriptionMessage);
+        activeSubscriptions.add(subscriptionKey);
+        console.log('----------------------------------------------------------------------');
+        console.log(`SUBSCRIBED TO COLLECTION: ${task.contract.slug} MAGICEDEN`);
+        console.log('----------------------------------------------------------------------');
+      }
+
+      const connectToBlur = task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("blur");
+      if (connectToBlur) {
+        const blurSubscriptionMessage = {
+          "slug": task.contract.slug,
+          "event": "join_the_party",
+          "topic": task.contract.slug,
+          "contractAddress": task.contract.contractAddress,
+          "clientId": clientId,
+          "marketplace": BLUR
+        };
+
+        safeSendMessage(blurSubscriptionMessage);
+        activeSubscriptions.add(subscriptionKey);
+        console.log('----------------------------------------------------------------------');
+        console.log(`SUBSCRIBED TO COLLECTION: ${task.contract.slug} BLUR`);
+        console.log('----------------------------------------------------------------------');
+      }
+
     });
 
   } catch (error) {
@@ -5977,4 +6084,38 @@ export interface Orders {
 interface ApiResponse {
   orders: Orders[],
   continuation: string | null
+}
+
+// Helper function to cancel existing orders
+async function cancelExistingOrders(orderKeys: string[], privateKey: string, taskId: string) {
+  if (orderKeys.length > 0) {
+    const orderData = await redis.mget(orderKeys);
+    const cancelData = orderData.map((orderKey, index) => {
+      if (!orderKey) return
+      const order = JSON.parse(orderKey);
+      const payload = order.payload
+      return {
+        name: CANCEL_BLUR_BID,
+        data: { privateKey, payload, taskId, orderKey: orderKeys[index] }
+      }
+    }).filter(Boolean)
+    await processBulkJobs(cancelData);
+  }
+}
+
+// Helper function to log skip message and cancel orders
+function logSkipAndCancel(skipStats: any, taskId: string, slug: string, trait: string, newBidPrice: number, maxBidPrice: number, orderKeys: string[], privateKey: string) {
+  if (!skipStats[taskId]) {
+    skipStats[taskId] = {
+      opensea: 0,
+      magiceden: 0,
+      blur: 0
+    };
+  }
+  skipStats[taskId]['blur']++;
+  console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+  console.log(RED + `❌ Required offer price ${newBidPrice} BETH for ${slug} trait ${trait} exceeds max bid price ${maxBidPrice} BETH FOR BLUR.Skipping ...`.toUpperCase() + RESET);
+  console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+
+  cancelExistingOrders(orderKeys, privateKey, taskId);
 }

@@ -58,10 +58,6 @@ export async function bidOnBlur(
   const offerPrice = BigNumber.from(offer_price.toString());
   const accessToken = await getAccessToken(BLUR_API_URL, private_key);
 
-  console.log({ slug, offerPrice: offerPrice.toString() });
-  console.log({ slug, expiry });
-
-
   offerPriceEth = (Math.floor(Number(utils.formatUnits(offerPrice)) * 100) / 100).toFixed(2);
 
   if (Number(offerPriceEth) === 0) {
@@ -98,9 +94,6 @@ export async function bidOnBlur(
     build = await formatBidOnBlur(BLUR_API_URL, accessToken, wallet_address, buildPayload);
 
   } catch (error: any) {
-
-    console.log(RED + `Error formatting bid on Blur for ${slug}:`, error?.response || error + RESET);
-
     if (!errorStats[taskId]) {
       errorStats[taskId] = {
         magiceden: 0,
@@ -149,7 +142,6 @@ export async function bidOnBlur(
     await submitBidToBlur(taskId, bidCount, offer_price, BLUR_API_URL, accessToken, wallet_address, submitPayload, slug, cancelPayload, expiry, traits);
 
   } catch (error: any) {
-    console.log("blur post offer error: ", error?.response?.data || error?.message);
     if (!errorStats[taskId]) {
       errorStats[taskId] = {
         magiceden: 0,
@@ -237,7 +229,6 @@ async function formatBidOnBlur(
     );
     return data;
   } catch (error: any) {
-    console.log(RED + `Error formatting bid on Blur for:`, error?.response || error + RESET);
     if (error.response?.data?.message === 'Balance over-utilized' || error.message?.message === 'Balance over-utilized') {
       console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
       console.log(RED + 'BALANCE OVER-UTILIZED: BETH balance is being used in too many active orders' + RESET);
@@ -314,8 +305,6 @@ async function submitBidToBlur(
         offer: offer_price.toString(),
         payload: cancelPayload
       })
-      // const sanitizedExpiry = expiry > 60 ? expiry : 60
-
 
       await Promise.all([
         redis.setex(orderKey, expiry, order),
@@ -389,8 +378,6 @@ export async function fetchBlurBid(collection: string, criteriaType: 'TRAIT' | '
         'X-NFT-API-Key': API_KEY,
       }
     }));
-
-    console.log({ collection, data: JSON.stringify(data) });
 
     return data;
   } catch (error: any) {
