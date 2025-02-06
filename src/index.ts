@@ -23,6 +23,7 @@ import { BigNumber, constants, Contract, ethers, utils, Wallet as Web3Wallet } f
 import { DistributedLockManager } from "./utils/lock";
 import { exec } from "child_process";
 import { execSync } from "child_process";
+import net from 'net'
 
 let RATE_LIMIT = Number(process.env.RATE_LIMIT);
 let API_KEY = process.env.API_KEY;
@@ -88,6 +89,8 @@ const QUEUE_OPTIONS: QueueOptions = {
   }
 };
 
+let netEnabled = true;
+
 const workers = Array.from({ length: WORKER_COUNT }, (_, index) => new Worker(
   QUEUE_NAME,
   async (job) => {
@@ -95,13 +98,13 @@ const workers = Array.from({ length: WORKER_COUNT }, (_, index) => new Worker(
       const shutdown = new Promise((_, reject) => {
         process.once('SIGTERM', () => reject(new Error('Worker shutdown')));
       });
+      if (!netEnabled) return;
       try {
         const result = await Promise.race([
           processJob(job),
           new Promise((_, reject) => setTimeout(() => reject(new Error('Job timeout')), JOB_TIMEOUT)),
           shutdown
         ]);
-
         broadcastBidRates();
         return result;
       } catch (error: any) {
@@ -191,7 +194,7 @@ const CANCEL_MAGICEDEN_BID = "CANCEL_MAGICEDEN_BID"
 const CANCEL_BLUR_BID = "CANCEL_BLUR_BID"
 const MAGICEDEN_MARKETPLACE = "0x9A1D00bEd7CD04BCDA516d721A596eb22Aac6834"
 const MAX_RETRIES: number = 5;
-const MARKETPLACE_WS_URL = "ws://localhost:8080";
+const MARKETPLACE_WS_URL = "wss://wss-marketplace.nfttools.website";
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY as string;
 const PRIORITIZED_THRESHOLD = RATE_LIMIT * WORKER_COUNT;
 const OPENSEA_PROTOCOL_ADDRESS = "0x0000000000000068F116a894984e2DB1123eB395"
@@ -1980,6 +1983,8 @@ async function updateMultipleTasksStatus(data: { tasks: ITask[], running: boolea
 }
 
 let wsConnectionStatus: 'connected' | 'disconnected' | 'connecting' = 'disconnected';
+let pingIntervalId: NodeJS.Timeout | null = null;
+
 
 async function connectWebSocket(): Promise<void> {
   wsConnectionStatus = 'connecting';
@@ -1987,13 +1992,24 @@ async function connectWebSocket(): Promise<void> {
 
   ws.addEventListener("open", async function open() {
     wsConnectionStatus = 'connected';
+    retryCount = 0;
+    // Send custom ping messages at regular intervals
+    if (pingIntervalId !== null) {
+      clearTimeout(pingIntervalId);
+      pingIntervalId = null;
+    }
+    pingIntervalId = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' })); // Custom ping message
+        console.log('-----PING------');
+      }
+    }, 30000); // 15 seconds interval
     clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({ type: 'wsConnectionStatus', data: wsConnectionStatus }));
       }
     });
     console.log(GOLD + "CONNECTED TO MARKETPLACE EVENTS WEBSOCKET" + RESET);
-    retryCount = 0;
 
     // Clear existing timeouts/intervals
     if (reconnectTimeoutId !== null) {
@@ -2026,6 +2042,9 @@ async function connectWebSocket(): Promise<void> {
     ws.on("message", async function incoming(data: string) {
       try {
         const message = JSON.parse(data.toString())
+        if (message.type === 'pong') {
+          console.log('Pong received from server.');
+        }
         await handleCounterBid(message);
       } catch (error) {
       }
@@ -2041,7 +2060,7 @@ async function connectWebSocket(): Promise<void> {
       }
     });
 
-    console.log(RED + "DISCONNECTED FROM MARKETPLACE EVENTS WEBSCKET" + RESET);
+    console.log(RED + "DISCONNECTED FROM MARKETPLACE EVENTS WEBSCKET" + `_TIME_AT_${String(new Date().getDate()).padStart(2, '0')} / ${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}` + RESET);
     if (heartbeatIntervalId !== null) {
       clearInterval(heartbeatIntervalId);
       heartbeatIntervalId = null;
@@ -2075,6 +2094,7 @@ function attemptReconnect(): void {
     console.log("Max retries reached. Giving up on reconnecting.");
   }
 }
+
 
 async function handleCounterBid(message: any) {
   try {
@@ -3157,6 +3177,10 @@ async function handleBlurCounterbid(data: any, task: ITask) {
       const currentBidPrice = !offers.length ? 0 : Math.max(...offers.map((offer) => Number(offer)))
       if (incomingPrice <= currentBidPrice) return
 
+      console.log(GOLD + '---------------------------------------------------------------------------------' + RESET);
+      console.log(GOLD + `incoming collection offer for ${task.contract.slug} for ${incomingPrice} BETH on blur`.toUpperCase() + RESET);
+      console.log(GOLD + '---------------------------------------------------------------------------------' + RESET);
+
       const rawPrice = (blurOutbidMargin * 1e18) + Number(incomingPrice)
       let offerPrice = BigInt(Math.round(rawPrice / 1e16) * 1e16)
       const offerPriceEth = Number(offerPrice) / 1e18
@@ -3195,8 +3219,6 @@ async function handleBlurCounterbid(data: any, task: ITask) {
         }
         return;
       }
-
-
 
       const jobId = `counterbid-${task._id}-${task.contract.slug}-${BLUR.toLowerCase()}-collection`
       const job: Job = await queue.getJob(jobId)
@@ -5280,6 +5302,27 @@ function transformOpenseaTraits(selectedTraits: Record<string, string[]>): { typ
 }
 
 
+
+function checkNetwork() {
+  const socket = new net.Socket();
+
+  socket.setTimeout(5000);
+  socket.on('connect', () => {
+    console.log('Network is connected');
+    netEnabled = true;
+    socket.destroy();
+  });
+
+  socket.on('error', () => {
+    console.log('Network is not connected');
+    netEnabled = false;
+  });
+
+  socket.connect(80, 'google.com');
+}
+
+checkNetwork();
+
 let marketplaceIntervals: { [key: string]: NodeJS.Timeout } = {};
 function subscribeToCollections(tasks: ITask[]) {
   try {
@@ -5456,45 +5499,35 @@ async function getAllowanceWithRetry(contract: Contract, owner: string, spender:
   }
 }
 
+
 async function approveMarketplace(currency: string, marketplace: string, task: ITask, maxBidPriceEth: number): Promise<boolean> {
+
+  //check approval value and return. If this is not set wethContract.allowance will be called and RPC limit can be drained unecessary.
   const lockKey = `approve:${task.wallet.address.toLowerCase()}:${marketplace.toLowerCase()} `;
+
+  //check if lockExist. approve can be delayed by blockchain net or gaslimist issue and approveMarketplace function can be called within delaytime. Then approve will be twice.
+  const lockExist = await lockManager.checkExistLock(lockKey);
+  if (lockExist) return false;
 
   return await lockManager.withLock(lockKey, async () => {
     try {
-      const provider = new ethers.providers.AlchemyProvider('mainnet', ALCHEMY_API_KEY);
-      const signer = new Web3Wallet(task.wallet.privateKey, provider);
-      const wethContract = new Contract(currency, WETH_MIN_ABI, signer);
+      if (!task?.wallet.openseaApproval) {// this check have to placed in firstline. If not, wethContract.allowance will be called and RPC limit can be drained unecessary.
+        const provider = new ethers.providers.AlchemyProvider('mainnet', ALCHEMY_API_KEY);
+        const signer = new Web3Wallet(task.wallet.privateKey, provider);
+        const wethContract = new Contract(currency, WETH_MIN_ABI, signer);
 
-      const allowanceWei = await getAllowanceWithRetry(wethContract, task.wallet.address, marketplace);
-      const allowance = Number(allowanceWei) / 1e18;
-
-      if (allowance > maxBidPriceEth) return true;
-
-      if (!task?.wallet.openseaApproval) {
+        let allowance = Number(await wethContract.allowance(task.wallet.address, marketplace)) / 1e18;
+        if (allowance > maxBidPriceEth) return true;
         console.log(`Approving WETH ${marketplace} as a spender for wallet ${task.wallet.address} with amount: ${constants.MaxUint256.toString()}...`.toUpperCase());
-
-        let tx;
-        let retries = 0;
-        while (retries < MAX_RETRIES) {
-          try {
-            tx = await wethContract.approve(marketplace, constants.MaxUint256);
-            await tx.wait();
-            break;
-          } catch (error: any) {
-            if (retries === MAX_RETRIES - 1 || error.code !== 'SERVER_ERROR') {
-              throw error;
-            }
-            retries++;
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-          }
-        }
+        const tx = await wethContract.approve(marketplace, constants.MaxUint256);
+        await tx.wait();
 
         const updateData = marketplace.toLowerCase() === SEAPORT.toLowerCase()
           ? { openseaApproval: true }
           : { magicedenApproval: true };
 
         await Wallet.updateOne({ address: { $regex: new RegExp(task.wallet.address, 'i') } }, updateData);
-        await Task.updateOne({ _id: task._id }, { $set: updateData });
+        await Task.updateOne({ _id: task._id }, { $set: { ...task.wallet, ...updateData } });
       }
 
       return true;
@@ -5502,17 +5535,18 @@ async function approveMarketplace(currency: string, marketplace: string, task: I
       const name = marketplace.toLowerCase() === "0x0000000000000068f116a894984e2db1123eb395".toLowerCase() ? OPENSEA : MAGICEDEN;
 
       if (error.code === 'INSUFFICIENT_FUNDS') {
-        console.error(RED + `Error: Wallet ${task.wallet.address} could not approve ${name} as a spender. Please ensure your wallet has enough ETH to cover the gas fees and permissions are properly set.`.toUpperCase() + RESET);
+        console.error(RED + `Error: Wallet ${task.wallet.address} could not approve ${name} as a spender.Please ensure your wallet has enough ETH to cover the gas fees and permissions are properly set.`.toUpperCase() + RESET);
       } else {
         console.error(RED + `Error details: `, error);
         console.error(`Error message: ${error.message} `);
         console.error(`Error code: ${error.code} `);
-        console.error(RED + `Error: Wallet ${task.wallet.address} could not approve the ${name} as a spender. Task has been stopped.`.toUpperCase() + RESET);
+        console.error(RED + `Error: Wallet ${task.wallet.address} could not approve the ${name} as a spender.Task has been stopped.`.toUpperCase() + RESET);
       }
       return false;
     }
   }) ?? false;
 }
+
 
 // In the hasActivePrioritizedJobs function:
 async function hasActivePrioritizedJobs(task: ITask): Promise<boolean> {
