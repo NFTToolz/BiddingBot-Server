@@ -29,6 +29,7 @@ let API_KEY = process.env.API_KEY;
 const bidStats: BidCounts = {};
 const bestOffers: BidCounts = {};
 const floorPrices: BidCounts = {};
+const warningBids: WarningBids = {};
 export const errorStats: BidCounts = {};
 const skipStats: BidCounts = {};
 const redis = redisClient.getClient()
@@ -236,7 +237,7 @@ async function monitorHealth() {
     console.log({ bidStats });
     console.log({ bestOffers });
     console.log({ floorPrices });
-
+    console.log({ warningBids });
 
     const counts = await queue.getJobCounts();
     const used = process.memoryUsage();
@@ -473,7 +474,7 @@ function broadcastBidRates() {
   const bidRates = activeTasks.size > 0 ? getAllBidRates() : 0;
   const message = JSON.stringify({
     type: 'bidRatesUpdate',
-    data: { bidRates, bidCounts: bidStats, skipCounts: skipStats, errorCounts: errorStats, floorPrices, bestOffers }
+    data: { bidRates, bidCounts: bidStats, skipCounts: skipStats, errorCounts: errorStats, floorPrices, bestOffers, warningBids }
   });
 
   clients.forEach(client => {
@@ -990,7 +991,7 @@ function generateJobKey(job: any): string {
     specificIdentifier = '-collection';
   }
 
-  return `${taskId}-${contractSlug}-${marketplace}${specificIdentifier}-${timestamp}`;
+  return `${taskId}-${contractSlug}-${marketplace}${specificIdentifier}`;
 }
 
 class RateLimiter {
@@ -2152,15 +2153,27 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
       floor_price = Number(await fetchMagicEdenCollectionStats(task.contract.contractAddress))
     }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice) {
+    if (!warningBids[task._id]) {
+      warningBids[task._id] = {
+        opensea: false,
+        magiceden: false,
+        blur: false
+      }
+    }
+
+    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
       const floor_price = floorPrices[task._id]?.magiceden || 0;
       if (!floor_price || floor_price === 0) return;
 
-      if (floor_price < task.stopOptions.minFloorPrice) {
+      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
+        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+
+        warningBids[task._id].magiceden = true
         return;
+      } else {
+        warningBids[task._id].magiceden = false
       }
     }
 
@@ -2533,15 +2546,26 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
       floor_price = data;
     }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice) {
+    if (!warningBids[task._id]) {
+      warningBids[task._id] = {
+        opensea: false,
+        magiceden: false,
+        blur: false
+      }
+    }
+
+    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
       const floor_price = floorPrices[task._id]?.opensea || 0;
       if (!floor_price || floor_price === 0) return;
 
-      if (floor_price < task.stopOptions.minFloorPrice) {
+      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
+        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+        warningBids[task._id].opensea = true
         return;
+      } else {
+        warningBids[task._id].opensea = false
       }
     }
 
@@ -2968,16 +2992,26 @@ async function handleBlurCounterbid(data: any, task: ITask) {
       floor_price = stats;
     }
 
+    if (!warningBids[task._id]) {
+      warningBids[task._id] = {
+        opensea: false,
+        magiceden: false,
+        blur: false
+      }
+    }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice) {
+    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
       const floor_price = floorPrices[task._id]?.blur || 0;
       if (!floor_price || floor_price === 0) return;
 
-      if (floor_price < task.stopOptions.minFloorPrice) {
+      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
+        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+        warningBids[task._id].blur = true
         return;
+      } else {
+        warningBids[task._id].blur = false
       }
     }
 
@@ -3017,7 +3051,7 @@ async function handleBlurCounterbid(data: any, task: ITask) {
         })
         const currentBidPrice = !offers.length ? 0 : Math.max(...offers.map((offer) => Number(offer)))
         const currentBidPriceEth = currentBidPrice / 1e18
-        
+
         if (incomingPrice <= currentBidPriceEth) return
 
         let offerPrice: any = Number((blurOutbidMargin + Number(incomingPrice)).toFixed(2))
@@ -3292,14 +3326,25 @@ async function processOpenseaScheduledBid(task: ITask) {
     const traitBid = selectedTraits && Object.keys(selectedTraits).length > 0
     const data = await getCollectionStats(task.contract.slug);
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice) {
+    if (!warningBids[task._id]) {
+      warningBids[task._id] = {
+        opensea: false,
+        magiceden: false,
+        blur: false
+      }
+    }
+
+    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
       if (!data || data === 0) return;
       const floor_price = data;
-      if (floor_price < task.stopOptions.minFloorPrice) {
+      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
+        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+        warningBids[task._id].opensea = true
         return;
+      } else {
+        warningBids[task._id].opensea = false
       }
     }
     if (!data || data === 0) return
@@ -3577,15 +3622,24 @@ async function processBlurScheduledBid(task: ITask) {
     const traitBid = selectedTraits && Object.keys(selectedTraits).length > 0
     const floor_price: number = Number(await fetchBlurCollectionStats(task.contract.slug));
 
+    if (!warningBids[task._id]) {
+      warningBids[task._id] = {
+        opensea: false,
+        magiceden: false,
+        blur: false
+      }
+    }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice) {
+    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
       if (!floor_price || floor_price === 0) return;
-
-      if (floor_price < task.stopOptions.minFloorPrice) {
+      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
+        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+        warningBids[task._id].blur = true
         return;
+      } else {
+        warningBids[task._id].blur = false
       }
     }
     const bestOffer = await fetchBlurBid(task.contract.contractAddress, "COLLECTION", {})
@@ -4486,15 +4540,25 @@ async function processMagicedenScheduledBid(task: ITask) {
     const currentTime = new Date().getTime();
     const expiration = Math.floor((currentTime + (duration * 60 * 1000)) / 1000);
     const floor_price = Number(await fetchMagicEdenCollectionStats(task.contract.contractAddress))
+    if (!warningBids[task._id]) {
+      warningBids[task._id] = {
+        opensea: false,
+        magiceden: false,
+        blur: false
+      }
+    }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice) {
+    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
       if (!floor_price || floor_price === 0) return;
 
-      if (floor_price < task.stopOptions.minFloorPrice) {
+      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
+        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+        warningBids[task._id].magiceden = true
         return;
+      } else {
+        warningBids[task._id].magiceden = false
       }
     }
 
@@ -5157,7 +5221,7 @@ function calculateBidPrice(task: ITask, floorPrice: number, marketplaceName: "op
   }
 
   // Validate min/max bid prices
-  if (minBidPriceEth > maxBidPriceEth) {
+  if (maxBidPriceEth > 0 && minBidPriceEth > maxBidPriceEth) {
     throw new Error(`Invalid bid price configuration: Minimum bid price (${minBidPriceEth} ETH) cannot be greater than maximum bid price (${maxBidPriceEth} ETH)`);
   }
 
@@ -5731,6 +5795,15 @@ interface BidCounts {
     blur: number;
   };
 }
+
+interface WarningBids {
+  [key: string]: {
+    opensea: boolean;
+    magiceden: boolean;
+    blur: boolean;
+  };
+}
+
 
 
 export function trackBidRate(marketplace: 'opensea' | 'magiceden' | 'blur', taskId: string) {
