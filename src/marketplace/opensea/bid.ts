@@ -1,7 +1,7 @@
 import { BigNumber, Contract, ethers, Wallet } from "ethers";
 import { SEAPORT_CONTRACT_ADDRESS, SEAPORT_MIN_ABI, WETH_MIN_ABI } from "../../constants";
 import { axiosInstance, limiter } from "../../init";
-import { activeTasks, BLUE, currentTasks, decrementBidCount, errorStats, OPENSEA_SCHEDULE, OPENSEA_TOKEN_BID, OPENSEA_TRAIT_BID, queue, redis, trackBidRate } from "../..";
+import { activeTasks, BLUE, currentTasks, decrementBidCount, errorStats, logBidError, OPENSEA_SCHEDULE, OPENSEA_TOKEN_BID, OPENSEA_TRAIT_BID, queue, redis, trackBidRate } from "../..";
 import { config } from "dotenv";
 import { createBalanceChecker } from "../../utils/balance";
 import { Job } from "bullmq";
@@ -138,7 +138,7 @@ const deps = {
 const balanceChecker = createBalanceChecker(deps);
 
 
-async function buildItemOffer(offerSpecification: ItemOfferSpecification) {
+async function buildItemOffer(taskId: string, offerSpecification: ItemOfferSpecification) {
   try {
     const {
       assetContractAddress,
@@ -148,10 +148,10 @@ async function buildItemOffer(offerSpecification: ItemOfferSpecification) {
       expirationSeconds,
       walletAddress
     } = offerSpecification
-    const task = currentTasks.find((task) => task.contract.contractAddress.toLowerCase() === offerSpecification.assetContractAddress.toLowerCase() && task.selectedMarketplaces.includes("OpenSea"))
-    if (!task) return
+    const task = activeTasks.get(taskId)
 
-    const consideration = await getItemConsideration(
+    if (!task) return
+    const consideration = getItemConsideration(
       assetContractAddress,
       tokenId,
       quantity,
@@ -178,7 +178,8 @@ async function buildItemOffer(offerSpecification: ItemOfferSpecification) {
     }
 
     return offer
-  } catch (error) {
+  } catch (error: any) {
+    await logBidError(taskId, "BUILD ITEM OFFER ERROR", `Error building OpenSea item offer: ${offerSpecification.tokenId}`, "error", "opensea");
     throw error
   }
 }
@@ -239,9 +240,9 @@ export async function bidOnOpensea(
   const wethBalance = await balanceChecker.getWethBalance(wallet_address);
 
   if (offerPriceEthFinal > wethBalance) {
-    console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-    console.log(RED + `Offer price: ${offerPriceEthFinal} WETH  is greater than available WETH balance: ${wethBalance} WETH. SKIPPING ...`.toUpperCase() + RESET);
-    console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
+
+    const message = `Offer price: ${offerPriceEthFinal} WETH  is greater than available WETH balance: ${wethBalance} WETH. SKIPPING ...`
+    await logBidError(taskId, "INSUFFICIENT WETH BALANCE", message, "error", "opensea");
     return
   }
 
@@ -249,7 +250,7 @@ export async function bidOnOpensea(
   const openseaFee = BigNumber.from(250);
 
   if (asset) {
-    const offer = await buildItemOffer({
+    const offer = await buildItemOffer(task._id, {
       assetContractAddress: asset.contractAddress,
       tokenId: asset.tokenId.toString(),
       walletAddress: wallet_address,
@@ -299,11 +300,9 @@ export async function bidOnOpensea(
     const currentTask = activeTasks.get(taskId)
     if (!currentTask?.running || !currentTask.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("OPENSEA".toLowerCase())) return
 
-    const itemResponse = await postItemOffer(offer, itemSignature, slug)
+    const itemResponse = await postItemOffer(taskId, offer, itemSignature, slug)
     const itemOrderHash = itemResponse?.order?.order_hash
-
     const orderTrackingKey = `{${taskId}}:opensea:orders`;
-
     const orderKey = `{${taskId}}:${count}:opensea:order:${slug}:${asset.tokenId}`;
 
     const order = JSON.stringify({
@@ -381,7 +380,7 @@ export async function bidOnOpensea(
     };
 
     try {
-      const data = await buildOffer(buildPayload)
+      const data = await buildOffer(taskId, buildPayload)
 
       if (!data || !data.partialParameters) return
       payload.protocol_data.parameters.startTime = BigInt(Math.floor(Date.now() / 1000)).toString();
@@ -439,6 +438,10 @@ export async function bidOnOpensea(
       await submitOfferToOpensea(slug, bidCount, offerPrice.toString(), payload, expiry, opensea_traits)
     } catch (error: any) {
 
+      const message = `Error submitting OpenSea offer for collection ${slug}: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+
+      await logBidError(taskId, "SUBMIT OFFER TO OPENSEA ERROR", message, "error", "opensea");
+
       // Skip logging for collection offers not supported error and duplicate orders
       if (error?.response?.data?.message?.errors?.[0] !== 'Collection offers are not supported for this collection' &&
         !error?.response?.data?.message?.errors?.includes('Duplicate order') &&
@@ -464,9 +467,7 @@ export async function bidOnOpensea(
  * @param payload - The payload of the offer.
  */
 async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: string, payload: IPayload, expiry = 900, opensea_traits?: string) {
-  let task = currentTasks.find((task) => task.contract.slug.toLowerCase() === slug.toLowerCase() || task.selectedMarketplaces.includes("OpenSea"))
   try {
-
     const [taskId, count] = bidCount.split(":")
     const currentTask = activeTasks.get(taskId)
     if (!currentTask?.running || !currentTask.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("OPENSEA".toLowerCase())) return
@@ -512,7 +513,9 @@ async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: 
 
 
   } catch (error: any) {
-    console.log({ submitOfferToOpensea: error, slug });
+    const [taskId] = bidCount.split(":")
+    const message = `Error submitting OpenSea offer for collection ${slug}: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+    await logBidError(taskId, "SUBMIT OFFER TO OPENSEA ERROR", message, "error", "opensea");
 
     if (error?.response?.data?.message?.errors?.[0] === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
       error?.message?.errors?.[0] === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
@@ -542,12 +545,11 @@ async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: 
   }
 }
 
-
 /**
  * Builds an offer on OpenSea.
  * @param buildPayload - The payload to build the offer.
  */
-async function buildOffer(buildPayload: any) {
+async function buildOffer(taskId: string, buildPayload: any) {
   try {
     const { data } = await limiter.schedule(() =>
       axiosInstance.request<PartialParameters>({
@@ -562,6 +564,8 @@ async function buildOffer(buildPayload: any) {
     );
     return data
   } catch (error: any) {
+    const message = `Error building OpenSea offer: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+    await logBidError(taskId, "BUILD OFFER ERROR", message, "error", "opensea");
     throw error
   }
 }
@@ -569,7 +573,7 @@ async function buildOffer(buildPayload: any) {
 export async function cancelOrder(orderHash: string, protocolAddress: string, privateKey: string, taskId: string) {
   if (!orderHash || !protocolAddress || !privateKey) return
 
-  const offererSignature = await signCancelOrder(orderHash, protocolAddress, privateKey);
+  const offererSignature = await signCancelOrder(taskId,orderHash, protocolAddress, privateKey);
 
   if (!offererSignature) {
     return;
@@ -592,6 +596,8 @@ export async function cancelOrder(orderHash: string, protocolAddress: string, pr
     decrementBidCount('opensea', taskId)
     return response.data;
   } catch (error: any) {
+    const message = `Error cancelling OpenSea order: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+    await logBidError(taskId, "CANCEL ORDER ERROR", message, "error", "opensea");
     // Ignore "Order not valid" errors
     if (error?.response?.data?.message?.errors?.[0] === 'Order not valid or already filled or cancelled.') {
       decrementBidCount('opensea', taskId)
@@ -601,7 +607,7 @@ export async function cancelOrder(orderHash: string, protocolAddress: string, pr
   }
 }
 
-async function signCancelOrder(orderHash: string, protocolAddress: string, privateKey: string) {
+async function signCancelOrder(taskId: string, orderHash: string, protocolAddress: string, privateKey: string) {
   if (!orderHash) return
 
   const wallet = new Wallet(privateKey, provider);
@@ -626,7 +632,9 @@ async function signCancelOrder(orderHash: string, protocolAddress: string, priva
     if (!value) return
     const signature = await wallet._signTypedData(domain, types, value);
     return signature;
-  } catch (error) {
+  } catch (error: any) {
+    const message = `Error signing OpenSea order cancellation: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+    await logBidError(taskId, "SIGN CANCEL ORDER ERROR", message, "error", "opensea");
     throw error
   }
 }
@@ -648,7 +656,7 @@ const getOffer = (priceWei: bigint) => {
   ]
 }
 
-async function postItemOffer(offer: unknown, signature: string, slug: string) {
+async function postItemOffer(taskId: string, offer: unknown, signature: string, slug: string) {
   try {
     const payload = {
       parameters: offer,
@@ -664,6 +672,9 @@ async function postItemOffer(offer: unknown, signature: string, slug: string) {
     }))
     return data
   } catch (error: any) {
+    const message = `Error posting OpenSea item offer: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+    await logBidError(taskId, "POST ITEM OFFER ERROR", message, "error", "opensea");
+
     if (error?.response?.data?.message?.errors?.[0] === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
       error?.message?.errors?.[0] === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
       error?.response?.data?.message === 'Outstanding order to wallet balance ratio exceeds allowed limit.' ||
@@ -686,7 +697,7 @@ async function postItemOffer(offer: unknown, signature: string, slug: string) {
 }
 
 
-const getItemConsideration = async (
+const getItemConsideration = (
   assetContractAddress: string,
   tokenId: string,
   quantity: number,
@@ -694,7 +705,7 @@ const getItemConsideration = async (
 
 ) => {
   const fees = [
-    await getItemTokenConsideration(assetContractAddress, tokenId, quantity, walletAddress)
+    getItemTokenConsideration(assetContractAddress, tokenId, quantity, walletAddress)
   ]
   return fees
 }
@@ -703,7 +714,7 @@ const getSalt = () => {
   return Math.floor(Math.random() * 100_000).toString()
 }
 
-const getItemTokenConsideration = async (
+const getItemTokenConsideration = (
   assetContractAddress: string,
   tokenId: string,
   quantity: number,
@@ -725,6 +736,7 @@ type OpenseaTopOffers = {
 }
 
 export async function fetchOpenseaOffers(
+  taskId: string,
   offerType: 'COLLECTION' | 'TRAIT' | 'TOKEN',
   collectionSlug: string,
   contractAddress: string,
@@ -840,6 +852,9 @@ export async function fetchOpenseaOffers(
       throw new Error("Invalid offer type");
     }
   } catch (error: any) {
+    const message = `Error fetching offers: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+    await logBidError(taskId, "FETCH OPENSEA OFFERS ERROR", message, "error", "opensea");
+
     console.error(RED + "Error fetching offers:",
       error?.response?.data?.message?.errors && error.response.data.message.errors.length > 0
         ? error.response.data.message.errors[0]
@@ -848,7 +863,7 @@ export async function fetchOpenseaOffers(
   }
 }
 
-export async function fetchOpenseaListings(collectionSlug: string, limit?: number) {
+export async function fetchOpenseaListings(taskId: string, collectionSlug: string, limit?: number) {
   try {
     const baseUrl = `https://api.nfttools.website/opensea/api/v2/listings/collection/${collectionSlug}/all`;
     let allListings: OpenseaOrder[] = [];
@@ -875,6 +890,8 @@ export async function fetchOpenseaListings(collectionSlug: string, limit?: numbe
     allListings = allListings.slice(0, limit);
     return allListings.map((item) => +item.protocol_data.parameters.offer[0].identifierOrCriteria)
   } catch (error: any) {
+    const message = `Error fetching OpenSea listings: ${error?.response?.data?.message || error.message}`
+    await logBidError(taskId, "FETCH OPENSEA LISTINGS ERROR", message, "error", "opensea");
     console.error("Error fetching listings:", error?.response?.data?.message || error.message);
     throw error;
   }

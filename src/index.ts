@@ -9,10 +9,13 @@ import http from 'http';
 import fs from 'fs/promises';
 import path from 'path';
 import { axiosInstance, initialize, limiter } from "./init";
+
 import { bidOnOpensea, cancelOrder, fetchOpenseaListings, fetchOpenseaOffers, IFee } from "./marketplace/opensea";
+
 import { bidOnBlur, cancelBlurBid, fetchBlurBid, fetchBlurCollectionStats } from "./marketplace/blur/bid";
 import { bidOnMagiceden, cancelMagicEdenBid, fetchMagicEdenCollectionStats, fetchMagicEdenOffer, fetchMagicEdenTokens } from "./marketplace/magiceden";
 import { getCollectionDetails, getCollectionStats } from "./functions";
+
 import mongoose from 'mongoose';
 import Task from "./models/task.model";
 import { Queue, Worker, Job, QueueOptions, JobType } from "bullmq";
@@ -24,6 +27,7 @@ import { DistributedLockManager } from "./utils/lock";
 import { exec } from "child_process";
 import { execSync } from "child_process";
 import net from 'net'
+import BidLogs from "./models/logs.model";
 
 let RATE_LIMIT = Number(process.env.RATE_LIMIT);
 let API_KEY = process.env.API_KEY;
@@ -1169,7 +1173,7 @@ async function processUpdatedTask(task: ITask) {
         if (task.bidPrice.minType == "eth" || task.openseaBidPrice.minType === "eth") {
           floor_price = 0
         } else {
-          const stats = await fetchBlurCollectionStats(task.contract.slug);
+          const stats = await fetchBlurCollectionStats(task._id, task.contract.slug);
           if (!stats || stats === 0) return
           floor_price = Number(stats)
         }
@@ -1203,7 +1207,7 @@ async function processUpdatedTask(task: ITask) {
           })
           .filter(id => id !== null);
 
-        const bottlomListing = await fetchOpenseaListings(task.contract.slug, autoIds[0]) ?? []
+        const bottlomListing = await fetchOpenseaListings(task._id, task.contract.slug, autoIds[0]) ?? []
         const taskTokenIds = task.tokenIds
         const tokenIds = [...bottlomListing, ...taskTokenIds]
         const tokenBid = task.bidType === "token" && tokenIds.length > 0
@@ -1248,7 +1252,7 @@ async function processUpdatedTask(task: ITask) {
         if (task.bidPrice.minType == "eth" || task.openseaBidPrice.minType === "eth") {
           floor_price = 0
         } else {
-          floor_price = Number(await fetchMagicEdenCollectionStats(task.contract.contractAddress))
+          floor_price = Number(await fetchMagicEdenCollectionStats(task._id, task.contract.contractAddress))
         }
         const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price as number, "magiceden")
         const offerPrice = Math.ceil(offerPriceEth * 1e18)
@@ -1261,7 +1265,7 @@ async function processUpdatedTask(task: ITask) {
           .filter(id => id !== null);
 
         const amount = autoIds[0]
-        const bottlomListing = amount ? await fetchMagicEdenTokens(task.contract.contractAddress, amount) : []
+        const bottlomListing = amount ? await fetchMagicEdenTokens(task._id, task.contract.contractAddress, amount) : []
         const taskTokenIds = task.tokenIds
         const tokenIds = bottlomListing ? [...bottlomListing, ...taskTokenIds] : [...taskTokenIds]
         const tokenBid = task.bidType === "token" && tokenIds.length > 0
@@ -2180,7 +2184,7 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
     if (task.bidPrice.minType == "eth" || task.openseaBidPrice.minType === "eth") {
       floor_price = 0
     } else {
-      floor_price = Number(await fetchMagicEdenCollectionStats(task.contract.contractAddress))
+      floor_price = Number(await fetchMagicEdenCollectionStats(task._id, task.contract.contractAddress))
     }
 
     if (!warningBids[task._id]) {
@@ -2258,8 +2262,14 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
       }
 
       if (maxBidPriceEth > 0 && offerPriceEth > maxBidPriceEth) {
+
+        const message = `magiceden counter offer ${offerPriceEth} WETH for ${task.contract.slug} ${tokenId} exceeds max bid price ${maxBidPriceEth} WETH ON MAGICEDEN.Skipping ...`.toUpperCase()
+
+        await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "magiceden");
+
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `magiceden counter offer ${offerPriceEth} WETH for ${task.contract.slug} ${tokenId}  exceeds max bid price ${maxBidPriceEth} WETH ON MAGICEDEN.Skipping ...`.toUpperCase() + RESET);
+        console.log(RED + message + RESET);
+
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
 
 
@@ -2364,8 +2374,10 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
         offerPrice = minBidPriceEth * 1e18
       }
       if (maxBidPriceEth > 0 && offerPriceEth > maxBidPriceEth) {
+        const message = `magiceden trait counter offer ${offerPriceEth} WETH for ${task.contract.slug} ${JSON.stringify(trait)} exceeds max bid price ${maxBidPriceEth} WETH ON MAGICEDEN.Skipping ...`.toUpperCase()
+        await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "magiceden");
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `magiceden trait counter offer ${offerPriceEth} WETH for ${task.contract.slug} ${JSON.stringify(trait)} exceeds max bid price ${maxBidPriceEth} WETH ON MAGICEDEN.Skipping ...`.toUpperCase() + RESET);
+        console.log(RED + message + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
 
         if (!skipStats[task._id]) {
@@ -2479,8 +2491,10 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
           };
         }
         skipStats[task._id]['magiceden']++;
+        const message = `counter Offer ${offerPriceEth} WETH for ${task.contract.slug}  exceeds max bid price ${maxBidPriceEth} WETH.Skipping ...`.toUpperCase()
+        await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "magiceden");
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `counter Offer ${offerPriceEth} WETH for ${task.contract.slug}  exceeds max bid price ${maxBidPriceEth} WETH.Skipping ...`.toUpperCase() + RESET);
+        console.log(RED + message + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
 
         if (orderKeys.length > 0) {
@@ -2651,10 +2665,11 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
           };
         }
         skipStats[task._id]['opensea']++;
+        const message = `counter offer ${offerPriceEth} WETH for ${task.contract.slug}:${tokenId}  exceeds max bid price ${maxBidPriceEth} WETH ON OPENSEA.Skipping ...`.toUpperCase()
+        await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "opensea");
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `counter offer ${offerPriceEth} WETH for ${task.contract.slug}:${tokenId}  exceeds max bid price ${maxBidPriceEth} WETH ON OPENSEA.Skipping ...`.toUpperCase() + RESET);
+        console.log(RED + message + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-
 
         if (orderKeys.length > 0) {
           const bidData = await redis.mget(orderKeys);
@@ -2785,7 +2800,7 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
         }
         skipStats[task._id]['opensea']++;
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `counter Offer ${offerPriceEth} WETH for ${task.contract.slug} ${JSON.stringify(trait)}  exceeds max bid price ${maxBidPriceEth} WETH ON OPENSEA.Skipping ...`.toUpperCase() + RESET);
+        console.log(RED + `counter Offer ${offerPriceEth} WETH for ${task.contract.slug} ${JSON.stringify(trait)} exceeds max bid price ${maxBidPriceEth} WETH ON OPENSEA.Skipping ...`.toUpperCase() + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
 
         if (orderKeys.length > 0) {
@@ -2905,8 +2920,10 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
           };
         }
         skipStats[task._id]['opensea']++;
+        const message = `counter Offer price ${offerPriceEth} WETH for ${task.contract.slug} exceeds max bid price ${maxBidPriceEth} WETH ON OPENSEA.Skipping ...`.toUpperCase()
+        await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "opensea");
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `counter Offer price ${offerPriceEth} WETH for ${task.contract.slug} exceeds max bid price ${maxBidPriceEth} WETH ON OPENSEA.Skipping ...`.toUpperCase() + RESET);
+        console.log(RED + message + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
 
         if (orderKeys.length > 0) {
@@ -2992,7 +3009,7 @@ async function handleBlurCounterbid(data: any, task: ITask) {
     if (task.bidPrice.minType == "eth" || task.openseaBidPrice.minType === "eth") {
       floor_price = 0
     } else {
-      const stats = await fetchBlurCollectionStats(task.contract.slug);
+      const stats = await fetchBlurCollectionStats(task._id, task.contract.slug);
       if (!stats || stats === 0) return
       floor_price = stats;
     }
@@ -3062,8 +3079,10 @@ async function handleBlurCounterbid(data: any, task: ITask) {
             };
           }
           skipStats[task._id]['blur']++;
+          const message = `counter Offer price ${Number(offerPrice) / 1e18} BETH for ${task.contract.slug} ${trait} exceeds max bid price ${maxBidPriceEth} BETH ON BLUR.Skipping ...`.toUpperCase()
+          await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "blur");
           console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-          console.log(RED + `counter Offer price ${Number(offerPrice) / 1e18} BETH for ${task.contract.slug} ${trait} exceeds max bid price ${maxBidPriceEth} BETH ON BLUR.Skipping ...`.toUpperCase() + RESET);
+          console.log(RED + message + RESET);
           console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
 
           if (orderKeys.length > 0) {
@@ -3171,8 +3190,10 @@ async function handleBlurCounterbid(data: any, task: ITask) {
           };
         }
         skipStats[task._id]['blur']++;
+        const message = `counter Offer price ${Number(offerPrice) / 1e18} BETH for ${task.contract.slug} exceeds max bid price ${maxBidPriceEth} BETH ON BLUR.Skipping ...`.toUpperCase()
+        await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "blur");
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `counter Offer price ${Number(offerPrice) / 1e18} BETH for ${task.contract.slug} exceeds max bid price ${maxBidPriceEth} BETH ON BLUR.Skipping ...`.toUpperCase() + RESET);
+        console.log(RED + message + RESET);
         console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
 
 
@@ -3335,7 +3356,7 @@ async function processOpenseaScheduledBid(task: ITask) {
 
     if (!data || data === 0) return
     const floor_price = data;
-    const highestOffer = await fetchOpenseaOffers('COLLECTION', task.contract.slug, task.contract.contractAddress, {})
+    const highestOffer = await fetchOpenseaOffers(task._id, 'COLLECTION', task.contract.slug, task.contract.contractAddress, {})
 
     const [topOffer] = highestOffer
 
@@ -3368,7 +3389,7 @@ async function processOpenseaScheduledBid(task: ITask) {
       })
       .filter(id => id !== null);
 
-    const bottlomListing = await fetchOpenseaListings(task.contract.slug, autoIds[0]) ?? []
+    const bottlomListing = await fetchOpenseaListings(task._id, task.contract.slug, autoIds[0]) ?? []
     const taskTokenIds = task.tokenIds
 
     const tokenIds = [...bottlomListing, ...taskTokenIds]
@@ -3459,7 +3480,7 @@ async function processOpenseaScheduledBid(task: ITask) {
         }
       }
       else {
-        const highestOffer = await fetchOpenseaOffers('COLLECTION', task.contract.slug, task.contract.contractAddress, {})
+        const highestOffer = await fetchOpenseaOffers(task._id, 'COLLECTION', task.contract.slug, task.contract.contractAddress, {})
         const [topOffer, secondOffer] = highestOffer
         const highestBidAmount = topOffer.amount
         const topOfferEth = Number(highestBidAmount) / 1e18;
@@ -3534,8 +3555,10 @@ async function processOpenseaScheduledBid(task: ITask) {
               };
             }
             skipStats[task._id]['opensea']++;
+            const message = `❌ Offer price ${offerPriceEth} WETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} WETH FOR OPENSEA.Skipping ...`.toUpperCase()
+            await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "opensea");
             console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-            console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} WETH FOR OPENSEA.Skipping ...`.toUpperCase() + RESET);
+            console.log(RED + message + RESET);
             console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
             if (orderKeys.length > 0) {
@@ -3606,7 +3629,7 @@ async function processBlurScheduledBid(task: ITask) {
     const WALLET_PRIVATE_KEY: string = task.wallet.privateKey;
     const selectedTraits = transformNewTask(filteredTasks)
     const traitBid = selectedTraits && Object.keys(selectedTraits).length > 0
-    const floor_price: number = Number(await fetchBlurCollectionStats(task.contract.slug));
+    const floor_price: number = Number(await fetchBlurCollectionStats(task._id, task.contract.slug));
 
     if (!warningBids[task._id]) {
       warningBids[task._id] = {
@@ -3618,7 +3641,7 @@ async function processBlurScheduledBid(task: ITask) {
 
     const stopBid = await stopOption(task, 'blur', floor_price, balances[task._id])
     if (stopBid) return
-    const bestOffer = await fetchBlurBid(task.contract.contractAddress, "COLLECTION", {})
+    const bestOffer = await fetchBlurBid(task._id, task.contract.contractAddress, "COLLECTION", {})
     const bestOfferAmount = bestOffer?.priceLevels?.[0]?.price ? Number(bestOffer.priceLevels[0].price) : 0
 
     if (!floorPrices[task._id]) {
@@ -3683,7 +3706,7 @@ async function processBlurScheduledBid(task: ITask) {
       const ttl = await redis.ttl(orderKey)
 
       const marketDataPromise = task.outbidOptions.outbid ?
-        fetchBlurBid(task.contract.slug, "COLLECTION", {}) :
+        fetchBlurBid(task._id, task.contract.slug, "COLLECTION", {}) :
         null;
 
       if (!task.outbidOptions.outbid) {
@@ -3768,8 +3791,10 @@ async function processBlurScheduledBid(task: ITask) {
                 };
               }
               skipStats[task._id]['blur']++;
+              const message = `❌ Required offer price ${newBidPrice} BETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} BETH FOR BLUR.Skipping ...`.toUpperCase()
+              await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "blur");
               console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-              console.log(RED + `❌ Required offer price ${newBidPrice} BETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} BETH FOR BLUR.Skipping ...`.toUpperCase() + RESET);
+              console.log(RED + message + RESET);
               console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
               // Cancel existing bids since we can't compete
@@ -3862,7 +3887,7 @@ async function processOpenseaTraitBid(data: {
     const [orderKey] = orderKeys
     const ttl = await redis.ttl(orderKey)
     const marketDataPromise = outbidOptions.outbid ?
-      fetchOpenseaOffers('TRAIT', slug, contractAddress, JSON.parse(trait)) :
+      fetchOpenseaOffers(_id, 'TRAIT', slug, contractAddress, JSON.parse(trait)) :
       null;
 
     if (!outbidOptions.outbid) {
@@ -3945,8 +3970,10 @@ async function processOpenseaTraitBid(data: {
             };
           }
           skipStats[_id]['opensea']++;
+          const message = `❌ Offer price ${offerPriceEth} WETH for ${slug} trait ${trait} bid exceeds max bid price ${maxBidPriceEth} WETH FOR OPENSEA.Skipping ...`.toUpperCase()
+          await logBidError(_id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "opensea");
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-          console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${slug} trait ${trait} bid exceeds max bid price ${maxBidPriceEth} WETH FOR OPENSEA.Skipping ...`.toUpperCase() + RESET);
+          console.log(RED + message + RESET);
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
           if (orderKeys.length > 0) {
@@ -4013,7 +4040,7 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
     const outbidMargin = calculateOutbidMargin(maxBidPriceEth);
 
     const marketDataPromise = outbidOptions.outbid ?
-      fetchOpenseaOffers("TOKEN", slug, asset.contractAddress, asset.tokenId.toString()) :
+      fetchOpenseaOffers(_id, "TOKEN", slug, asset.contractAddress, asset.tokenId.toString()) :
       null;
 
     const ttl = await redis.ttl(orderKey)
@@ -4099,8 +4126,10 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
             };
           }
           skipStats[_id]['opensea']++;
+          const message = `❌ Offer price ${offerPriceEth} WETH for ${slug} ${asset.tokenId} bid exceeds max bid price ${maxBidPriceEth} WETH FOR OPENSEA.Skipping ...`.toUpperCase()
+          await logBidError(_id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "opensea");
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-          console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${slug} ${asset.tokenId} bid exceeds max bid price ${maxBidPriceEth} WETH FOR OPENSEA.Skipping ...`.toUpperCase() + RESET);
+          console.log(RED + message + RESET);
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
           if (orderKeys.length > 0) {
@@ -4395,7 +4424,7 @@ async function processBlurTraitBid(data: {
       if (ttl >= MIN_BID_DURATION) return;
     }
     else {
-      const bids = await fetchBlurBid(slug, "TRAIT", JSON.parse(trait));
+      const bids = await fetchBlurBid(_id, slug, "TRAIT", JSON.parse(trait));
       const [topOffer, secondOffer] = bids?.priceLevels?.sort((a, b) => +b.price - +a.price) || [{ price: "0" }, { price: "0" }];
       const topOfferAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.price) : 0
       const secondOfferAmount = typeof secondOffer === 'object' && secondOffer ? Number(secondOffer.price) : 0
@@ -4456,6 +4485,8 @@ async function processBlurTraitBid(data: {
         } else {
           // Cancel existing bids since we can't compete at this price
           logSkipAndCancel(skipStats, _id, slug, trait, newBidPrice, maxBidPriceEth, orderKeys, privateKey);
+          const message = `❌ Required offer price ${newBidPrice} BETH for ${slug} trait ${trait} bid exceeds max bid price ${maxBidPriceEth} BETH FOR BLUR.Skipping ...`.toUpperCase()
+          await logBidError(_id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "blur");
           return;
         }
 
@@ -4515,7 +4546,7 @@ async function processMagicedenScheduledBid(task: ITask) {
     const duration = expiry / 60 || 15;
     const currentTime = new Date().getTime();
     const expiration = Math.floor((currentTime + (duration * 60 * 1000)) / 1000);
-    const floor_price = Number(await fetchMagicEdenCollectionStats(task.contract.contractAddress))
+    const floor_price = Number(await fetchMagicEdenCollectionStats(task._id, task.contract.contractAddress))
     if (!warningBids[task._id]) {
       warningBids[task._id] = {
         opensea: false,
@@ -4526,7 +4557,7 @@ async function processMagicedenScheduledBid(task: ITask) {
     const stopBid = await stopOption(task, 'magiceden', floor_price, balances[task._id])
     if (stopBid) return
 
-    const [bestOffer, secondBestOffer] = await fetchMagicEdenOffer(
+    const [bestOffer, secondBestOffer] = await fetchMagicEdenOffer(task._id,
       "COLLECTION",
       task.contract.contractAddress,
       {}
@@ -4561,7 +4592,7 @@ async function processMagicedenScheduledBid(task: ITask) {
       .filter(id => id !== null);
 
     const amount = autoIds[0]
-    const bottlomListing = amount ? await fetchMagicEdenTokens(task.contract.contractAddress, amount) : []
+    const bottlomListing = amount ? await fetchMagicEdenTokens(task._id, task.contract.contractAddress, amount) : []
     const taskTokenIds = task.tokenIds
     const tokenIds = bottlomListing ? [...bottlomListing, ...taskTokenIds] : [...taskTokenIds]
     const tokenBid = task.bidType === "token" && tokenIds.length > 0
@@ -4638,7 +4669,7 @@ async function processMagicedenScheduledBid(task: ITask) {
       const ttl = await redis.ttl(orderKey)
 
       const marketDataPromise = task.outbidOptions.outbid ?
-        fetchMagicEdenOffer("COLLECTION", task.contract.contractAddress, {}) :
+        fetchMagicEdenOffer(task._id, "COLLECTION", task.contract.contractAddress, {}) :
         null;
 
       if (!task.outbidOptions.outbid) {
@@ -4714,8 +4745,10 @@ async function processMagicedenScheduledBid(task: ITask) {
               };
             }
             skipStats[task._id]['magiceden']++;
+            const message = `❌ Offer price ${offerPriceEth} WETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase()
+            await logBidError(task._id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "magiceden");
             console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-            console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${task.contract.slug} collection bid exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase() + RESET);
+            console.log(RED + message + RESET);
             console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
 
@@ -4759,7 +4792,7 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
 
     const bestOffer = bestOffers[_id]?.magiceden || 0;
 
-    const marketDataPromise = outbidOptions?.outbid ? fetchMagicEdenOffer("TOKEN", contractAddress, tokenId.toString()) : null
+    const marketDataPromise = outbidOptions?.outbid ? fetchMagicEdenOffer(_id, "TOKEN", contractAddress, tokenId.toString()) : null
 
     let tokenOffer = Number(offerPrice)
 
@@ -4841,8 +4874,10 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
           }
 
           skipStats[_id]['magiceden']++;
+          const message = `❌ Offer price ${offerPriceEth} WETH for ${slug} ${tokenId} exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase()
+          await logBidError(_id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "magiceden");
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-          console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${slug} ${tokenId} exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase() + RESET);
+          console.log(RED + message + RESET);
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
           if (orderKeys.length > 0) {
@@ -4926,7 +4961,7 @@ async function processMagicedenTraitBid(data: {
     const [orderKey] = orderKeys
     const ttl = await redis.ttl(orderKey)
     const marketDataPromise = outbidOptions.outbid ?
-      fetchMagicEdenOffer('TRAIT', contractAddress, trait) :
+      fetchMagicEdenOffer(_id, "TRAIT", contractAddress, trait) :
       null;
 
     let traitOffer = Number(offerPrice)
@@ -5010,8 +5045,10 @@ async function processMagicedenTraitBid(data: {
             };
           }
           skipStats[_id]['magiceden']++;
+          const message = `❌ Offer price ${offerPriceEth} WETH for ${slug} trait ${JSON.stringify(trait)} bid exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase()
+          await logBidError(_id, "MAXIMUM BID PRICE EXCEEDED", message, "skipped", "magiceden");
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-          console.log(RED + `❌ Offer price ${offerPriceEth} WETH for ${slug} trait ${JSON.stringify(trait)} bid exceeds max bid price ${maxBidPriceEth} WETH FOR MAGICEDEN.Skipping ...`.toUpperCase() + RESET);
+          console.log(RED + message + RESET);
           console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
 
           if (orderKeys.length > 0) {
@@ -5127,7 +5164,7 @@ async function blukCancelBlurBid(data: BlurCancelPayload) {
   try {
     if (!data) return
     await Promise.all([
-      cancelBlurBid({ payload, privateKey, taskId }),
+      cancelBlurBid(taskId, { payload, privateKey, taskId }),
       redis.srem(`{${taskId}}:blur:orders`, orderKey),
       redis.del(orderKey),
     ])
@@ -5591,6 +5628,23 @@ export async function getMEHighestOffers(contract: `0x${string}`) {
   } catch (error) {
     console.error('Error fetching highest offers:', error);
     throw error;
+  }
+}
+
+
+export async function logBidError(taskId: string, title: string, message: string, type: "skipped" | "warning" | "error", marketplace: "opensea" | "magiceden" | "blur") {
+  try {
+    const bidLogs = new BidLogs({
+      taskId,
+      title,
+      message,
+      timestamp: new Date(),
+      type: type,
+      marketplace: marketplace
+    });
+    await bidLogs.save();
+  } catch (error) {
+    console.error(RED + `Error logging bid error: ${error}` + RESET);
   }
 }
 
