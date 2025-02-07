@@ -19,7 +19,7 @@ export interface ITask extends Document {
     privateKey: string;
     openseaApproval: boolean;
     blurApproval: boolean;
-    magicedenApproval: boolean
+    magicedenApproval: boolean;
   };
   selectedMarketplaces: string[];
   running: boolean;
@@ -45,24 +45,28 @@ export interface ITask extends Document {
     minType: "percentage" | "eth";
     maxType: "percentage" | "eth";
   };
+
   openseaBidPrice: {
     min: number;
     max: number | null;
     minType: "percentage" | "eth";
     maxType: "percentage" | "eth";
   };
-  magicEdenBidPrice: {
-    min: number;
-    max: number | null;
-    minType: "percentage" | "eth";
-    maxType: "percentage" | "eth";
-  };
+
   blurBidPrice: {
     min: number;
     max: number | null;
     minType: "percentage" | "eth";
     maxType: "percentage" | "eth";
   };
+
+  magicEdenBidPrice: {
+    min: number;
+    max: number | null;
+    minType: "percentage" | "eth";
+    maxType: "percentage" | "eth";
+  };
+
   stopOptions: {
     pauseAllBids: boolean;
     stopAllBids: boolean;
@@ -88,6 +92,8 @@ export interface ITask extends Document {
   slugValid: boolean;
   magicEdenValid: boolean;
   blurValid: boolean;
+  openseaValid: boolean;
+  balance: number;
 }
 
 const TaskSchema: Schema = new Schema(
@@ -182,6 +188,8 @@ const TaskSchema: Schema = new Schema(
     slugValid: { type: Boolean, default: null },
     magicEdenValid: { type: Boolean, default: null },
     blurValid: { type: Boolean, default: null },
+    openseaValid: { type: Boolean, default: null },
+    balance: { type: Number, default: 0 }
   },
   { timestamps: true }
 );

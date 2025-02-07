@@ -30,6 +30,7 @@ let API_KEY = process.env.API_KEY;
 const bidStats: BidCounts = {};
 const bestOffers: BidCounts = {};
 const floorPrices: BidCounts = {};
+const balances: any = {};
 const warningBids: WarningBids = {};
 export const errorStats: BidCounts = {};
 const skipStats: BidCounts = {};
@@ -194,7 +195,7 @@ const CANCEL_MAGICEDEN_BID = "CANCEL_MAGICEDEN_BID"
 const CANCEL_BLUR_BID = "CANCEL_BLUR_BID"
 const MAGICEDEN_MARKETPLACE = "0x9A1D00bEd7CD04BCDA516d721A596eb22Aac6834"
 const MAX_RETRIES: number = 5;
-const MARKETPLACE_WS_URL = "wss://wss-marketplace.nfttools.website";
+const MARKETPLACE_WS_URL = "wss://nfttools.pro?app=bidbot";
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY as string;
 const PRIORITIZED_THRESHOLD = RATE_LIMIT * WORKER_COUNT;
 const OPENSEA_PROTOCOL_ADDRESS = "0x0000000000000068F116a894984e2DB1123eB395"
@@ -1122,9 +1123,15 @@ async function processNewTask(task: ITask) {
   }
 }
 
+
+
 async function processUpdatedTask(task: ITask) {
   try {
     const existingTaskIndex = currentTasks.findIndex(t => t._id === task._id);
+    const taskDoc = await Task.findById(task._id).select('balance').exec();
+    const balance = taskDoc?.balance;
+    balances[task._id] = balance
+
     if (existingTaskIndex !== -1) {
       currentTasks.splice(existingTaskIndex, 1, task);
       activeTasks.set(task._id, task);
@@ -1438,6 +1445,10 @@ async function startTask(task: ITask, start: boolean) {
     return
   }
 
+  const taskDoc = await Task.findById(task._id).select('balance').exec();
+  const balance = taskDoc?.balance;
+  balances[task._id] = balance
+
   const RATE_LIMIT = process.env.RATE_LIMIT
   if (!RATE_LIMIT) {
     console.log(RED + 'RATE_LIMIT is not set' + RESET);
@@ -1459,7 +1470,6 @@ async function startTask(task: ITask, start: boolean) {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
           console.log(YELLOW + `WebSocket not ready, attempting to reconnect before subscribing to ${task.contract.slug}...` + RESET);
           await connectWebSocket();
-          return
         }
 
         console.log("subscribing to collection: ", task.contract.slug);
@@ -2181,23 +2191,9 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
       }
     }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
-      const floor_price = floorPrices[task._id]?.magiceden || 0;
-      if (!floor_price || floor_price === 0) return;
-
-      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-
-        warningBids[task._id].magiceden = true
-        return;
-      } else {
-        warningBids[task._id].magiceden = false
-      }
-    }
-
-
+    const balance = balances[task._id]
+    const stopBid = await stopOption(task, 'magiceden', floor_price, balance)
+    if (stopBid) return
     const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price as number, "magiceden")
     const magicedenOutbidMargin = task.outbidOptions.magicedenOutbidMargin || 0.0001
 
@@ -2574,20 +2570,9 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
       }
     }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
-      const floor_price = floorPrices[task._id]?.opensea || 0;
-      if (!floor_price || floor_price === 0) return;
+    const stopBid = await stopOption(task, 'opensea', floor_price, balances[task._id])
 
-      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        warningBids[task._id].opensea = true
-        return;
-      } else {
-        warningBids[task._id].opensea = false
-      }
-    }
+    if (stopBid) return
 
     const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, Number(floor_price), "opensea")
 
@@ -3020,21 +3005,9 @@ async function handleBlurCounterbid(data: any, task: ITask) {
       }
     }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
-      const floor_price = floorPrices[task._id]?.blur || 0;
-      if (!floor_price || floor_price === 0) return;
+    const stopBid = await stopOption(task, 'blur', floor_price, balances[task._id])
 
-      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        warningBids[task._id].blur = true
-        return;
-      } else {
-        warningBids[task._id].blur = false
-      }
-    }
-
+    if (stopBid) return
 
     const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, Number(floor_price), "blur")
     const selectedTraits = transformNewTask(task.selectedTraits)
@@ -3356,19 +3329,10 @@ async function processOpenseaScheduledBid(task: ITask) {
       }
     }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
-      if (!data || data === 0) return;
-      const floor_price = data;
-      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        warningBids[task._id].opensea = true
-        return;
-      } else {
-        warningBids[task._id].opensea = false
-      }
-    }
+    const stopBid = await stopOption(task, 'opensea', Number(data), balances[task._id])
+
+    if (stopBid) return
+
     if (!data || data === 0) return
     const floor_price = data;
     const highestOffer = await fetchOpenseaOffers('COLLECTION', task.contract.slug, task.contract.contractAddress, {})
@@ -3652,18 +3616,8 @@ async function processBlurScheduledBid(task: ITask) {
       }
     }
 
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
-      if (!floor_price || floor_price === 0) return;
-      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        warningBids[task._id].blur = true
-        return;
-      } else {
-        warningBids[task._id].blur = false
-      }
-    }
+    const stopBid = await stopOption(task, 'blur', floor_price, balances[task._id])
+    if (stopBid) return
     const bestOffer = await fetchBlurBid(task.contract.contractAddress, "COLLECTION", {})
     const bestOfferAmount = bestOffer?.priceLevels?.[0]?.price ? Number(bestOffer.priceLevels[0].price) : 0
 
@@ -4569,20 +4523,8 @@ async function processMagicedenScheduledBid(task: ITask) {
         blur: false
       }
     }
-
-    if (task.stopOptions?.triggerStopOptions && task.stopOptions?.minFloorPrice && task.stopOptions?.maxFloorPrice) {
-      if (!floor_price || floor_price === 0) return;
-
-      if (floor_price < task.stopOptions.minFloorPrice || floor_price > task.stopOptions.maxFloorPrice) {
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        console.log(RED + `❌ Floor price ${floor_price} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
-        console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-        warningBids[task._id].magiceden = true
-        return;
-      } else {
-        warningBids[task._id].magiceden = false
-      }
-    }
+    const stopBid = await stopOption(task, 'magiceden', floor_price, balances[task._id])
+    if (stopBid) return
 
     const [bestOffer, secondBestOffer] = await fetchMagicEdenOffer(
       "COLLECTION",
@@ -5235,11 +5177,11 @@ function calculateBidPrice(task: ITask, floorPrice: number, marketplaceName: "op
   let maxBidPriceEth: number;
   let minBidPriceEth: number;
   if (bidPrice.maxType === "percentage") {
-    maxBidPriceEth = Number((floorPrice * (bidPrice.max || task.bidPrice.max) / 100).toFixed(4));
-    minBidPriceEth = Number((floorPrice * (bidPrice.min || task.bidPrice.min) / 100).toFixed(4));
+    maxBidPriceEth = Number((floorPrice * (bidPrice.max || task.bidPrice.max || 0) / 100).toFixed(4));
+    minBidPriceEth = Number((floorPrice * (bidPrice.min || task.bidPrice.min || 0) / 100).toFixed(4));
   } else {
-    maxBidPriceEth = bidPrice.max || task.bidPrice.max;
-    minBidPriceEth = bidPrice.min || task.bidPrice.min;
+    maxBidPriceEth = bidPrice.max || task.bidPrice.max || 0;
+    minBidPriceEth = bidPrice.min || task.bidPrice.min || 0;
   }
 
   // Validate min/max bid prices
@@ -5254,6 +5196,63 @@ function calculateBidPrice(task: ITask, floorPrice: number, marketplaceName: "op
     minBidPriceEth = Math.floor(minBidPriceEth * 100) / 100;
   }
   return { offerPriceEth, maxBidPriceEth, minBidPriceEth };
+}
+
+async function stopOption(
+  task: ITask,
+  marketplace: 'opensea' | 'magiceden' | 'blur',
+  floorPrice: number,
+  balance: number = 0, // Optional parameter for balance checking
+): Promise<boolean> {
+  // Early return if stop options aren't configured
+  if (!task.stopOptions?.triggerStopOptions || !task.stopOptions?.minFloorPrice || !task.stopOptions?.maxFloorPrice) {
+    return false;
+  }
+
+  // Check floor price
+  if (!floorPrice || floorPrice === 0) {
+    return true;
+  }
+
+
+  // Check if floor price is outside allowed range
+  if (floorPrice < task.stopOptions.minFloorPrice || floorPrice > task.stopOptions.maxFloorPrice) {
+    console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+    console.log(RED + `❌ Floor price ${floorPrice} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
+    console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+
+    if (!warningBids[task._id]) {
+      warningBids[task._id] = {
+        opensea: false,
+        magiceden: false,
+        blur: false
+      };
+    }
+    warningBids[task._id][marketplace] = true;
+    return true;
+  }
+
+  // Optional balance check
+  if (task.stopOptions?.maxPurchase && task.stopOptions.maxPurchase > 0) {
+    const provider = new ethers.providers.AlchemyProvider('mainnet', ALCHEMY_API_KEY);
+    const abi = [
+      "function balanceOf(address owner) view returns (uint256 balance)",
+    ]
+    const contract = new Contract(task.contract.contractAddress, abi, provider);
+    const newBalance = await contract.balanceOf(task.wallet.address)
+    if (newBalance - balance >= task.stopOptions.maxPurchase) {
+      console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+      console.log(RED + `❌ Total purchase amount (${(newBalance - balance)} ETH) has reached or exceeded max purchase limit (${task.stopOptions.maxPurchase}) for ${task.contract.slug}. Skipping...`.toUpperCase() + RESET);
+      console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
+      warningBids[task._id].opensea = true;
+      warningBids[task._id].magiceden = true;
+      warningBids[task._id].blur = true;
+      return true;
+    }
+  }
+
+  warningBids[task._id][marketplace] = false;
+  return false;
 }
 
 function transformBlurTraits(selectedTraits: Record<string, string[]>): { [key: string]: string }[] {
@@ -5615,17 +5614,29 @@ export interface ITask {
     privateKey: string;
     openseaApproval: boolean;
     blurApproval: boolean;
-    magicedenApproval: boolean
+    magicedenApproval: boolean;
   };
   selectedMarketplaces: string[];
   running: boolean;
   tags: { name: string; color: string }[];
-  selectedTraits: SelectedTraits;
+  selectedTraits: Record<
+    string,
+    { name: string; availableInMarketplaces: string[] }[]
+  >;
   traits: {
     categories: Record<string, string>;
     counts: Record<
       string,
-      Record<string, { count: number; availableInMarketplaces: string[] }>
+      Record<
+        string,
+        {
+          count: number;
+          availableInMarketplaces: string[];
+          magicedenFloor: number;
+          blurFloor: number;
+          openseaFloor: number;
+        }
+      >
     >;
   };
   outbidOptions: {
@@ -5637,14 +5648,14 @@ export interface ITask {
   };
   bidPrice: {
     min: number;
-    max: number;
+    max: number | null;
     minType: "percentage" | "eth";
     maxType: "percentage" | "eth";
   };
 
   openseaBidPrice: {
     min: number;
-    max: number;
+    max: number | null;
     minType: "percentage" | "eth";
     maxType: "percentage" | "eth";
   };
@@ -5658,7 +5669,7 @@ export interface ITask {
 
   magicEdenBidPrice: {
     min: number;
-    max: number;
+    max: number | null;
     minType: "percentage" | "eth";
     maxType: "percentage" | "eth";
   };
@@ -5678,9 +5689,14 @@ export interface ITask {
   tokenIds: (number | string)[];
   bidType: string;
   loopInterval: { value: number; unit: string };
-  bidPriceType: "GENERAL_BID_PRICE" | "MARKETPLACE_BID_PRICE";
-
+  bidPriceType: string;
+  slugValid: boolean;
+  magicEdenValid: boolean;
+  blurValid: boolean;
+  openseaValid: boolean;
+  balance: number;
 }
+
 
 interface BidLevel {
   contractAddress: string;
