@@ -228,7 +228,7 @@ export async function bidOnOpensea(
     }
   }
   const offerPriceEth = Number(offer_price) / 1e18;
-  
+
   const leverage = 1000;
 
   if (totalOfferAmount + offerPriceEth >= leverage * wethBalance) {
