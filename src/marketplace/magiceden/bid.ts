@@ -319,7 +319,8 @@ async function sendSignedOrderData(order: any, taskId: string, offerPrice: strin
 
       const order = JSON.stringify({
         offer: offerPrice.toString(),
-        payload: payload
+        payload: payload,
+        createdAt: Date.now()
       })
 
       await Promise.all([

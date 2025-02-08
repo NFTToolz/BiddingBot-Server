@@ -2196,6 +2196,7 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
     }
 
     const balance = balances[task._id]
+    warningBids[task._id].magiceden = false;
     const stopBid = await stopOption(task, 'magiceden', floor_price, balance)
     if (stopBid) return
     const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price as number, "magiceden")
@@ -2583,7 +2584,7 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
         blur: false
       }
     }
-
+    warningBids[task._id].opensea = false;
     const stopBid = await stopOption(task, 'opensea', floor_price, balances[task._id])
 
     if (stopBid) return
@@ -3022,6 +3023,7 @@ async function handleBlurCounterbid(data: any, task: ITask) {
       }
     }
 
+    warningBids[task._id].blur = false;
     const stopBid = await stopOption(task, 'blur', floor_price, balances[task._id])
 
     if (stopBid) return
@@ -3350,6 +3352,7 @@ async function processOpenseaScheduledBid(task: ITask) {
       }
     }
 
+    warningBids[task._id].opensea = false;
     const stopBid = await stopOption(task, 'opensea', Number(data), balances[task._id])
 
     if (stopBid) return
@@ -3639,6 +3642,7 @@ async function processBlurScheduledBid(task: ITask) {
       }
     }
 
+    warningBids[task._id].blur = false;
     const stopBid = await stopOption(task, 'blur', floor_price, balances[task._id])
     if (stopBid) return
     const bestOffer = await fetchBlurBid(task._id, task.contract.contractAddress, "COLLECTION", {})
@@ -4554,6 +4558,7 @@ async function processMagicedenScheduledBid(task: ITask) {
         blur: false
       }
     }
+    warningBids[task._id].magiceden = false;
     const stopBid = await stopOption(task, 'magiceden', floor_price, balances[task._id])
     if (stopBid) return
 
@@ -5634,15 +5639,30 @@ export async function getMEHighestOffers(contract: `0x${string}`) {
 
 export async function logBidError(taskId: string, title: string, message: string, type: "skipped" | "warning" | "error", marketplace: "opensea" | "magiceden" | "blur") {
   try {
-    const bidLogs = new BidLogs({
+    // Try to find an existing log with the same taskId and message
+    const existingLog = await BidLogs.findOne({
       taskId,
-      title,
-      message,
-      timestamp: new Date(),
-      type: type,
-      marketplace: marketplace
+      message: { $regex: new RegExp(message, 'i') }
     });
-    await bidLogs.save();
+
+    if (existingLog) {
+      // Update timestamp of existing log
+      await BidLogs.updateOne(
+        { _id: existingLog._id },
+        { timestamp: new Date() }
+      );
+    } else {
+      // Create new log if no matching record exists
+      const bidLogs = new BidLogs({
+        taskId,
+        title,
+        message,
+        timestamp: new Date(),
+        type: type,
+        marketplace: marketplace
+      });
+      await bidLogs.save();
+    }
   } catch (error) {
     console.error(RED + `Error logging bid error: ${error}` + RESET);
   }

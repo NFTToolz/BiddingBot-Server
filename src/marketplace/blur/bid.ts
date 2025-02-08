@@ -45,8 +45,28 @@ export async function bidOnBlur(
 ) {
   const bethBalance = await balanceChecker.getBethBalance(wallet_address);
   let offerPriceEth: string | number = (Number(offer_price) / 1e18)
-
   const leverage = 200
+  let totalOfferAmount = 0;
+
+
+  for (const task of currentTasks) {
+    const blurOrders = await redis.smembers(`{${task._id}}:blur:orders`);
+
+    for (const orderKey of blurOrders) {
+      const orderData = await redis.get(orderKey);
+      if (orderData) {
+        const order = JSON.parse(orderData);
+        totalOfferAmount += Number(order.offer) / 1e18; // Convert from wei to ETH
+      }
+    }
+  }
+
+  if (totalOfferAmount + offerPriceEth >= leverage * bethBalance) {
+    console.log(`Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${bethBalance}`);
+
+    await logBidError(taskId, "INSUFFICIENT BETH BALANCE", `Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${bethBalance}`, "error", "blur");
+    return
+  }
 
   if (offerPriceEth > bethBalance) {
 
@@ -320,7 +340,8 @@ async function submitBidToBlur(
 
       const order = JSON.stringify({
         offer: offer_price.toString(),
-        payload: cancelPayload
+        payload: cancelPayload,
+        createdAt: Date.now()
       })
 
       await Promise.all([

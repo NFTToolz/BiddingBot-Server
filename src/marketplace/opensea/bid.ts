@@ -214,8 +214,32 @@ export async function bidOnOpensea(
     return
   }
 
-  // Convert wei to ETH for precision check
+  let totalOfferAmount = 0;
+  const wethBalance = await balanceChecker.getWethBalance(wallet_address);
+  for (const task of currentTasks) {
+    const openseaOrders = await redis.smembers(`{${task._id}}:opensea:orders`);
+
+    for (const orderKey of openseaOrders) {
+      const orderData = await redis.get(orderKey);
+      if (orderData) {
+        const order = JSON.parse(orderData);
+        totalOfferAmount += Number(order.offer) / 1e18; // Convert from wei to ETH
+      }
+    }
+  }
   const offerPriceEth = Number(offer_price) / 1e18;
+  
+  const leverage = 1000;
+
+  if (totalOfferAmount + offerPriceEth >= leverage * wethBalance) {
+    console.log(`Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${wethBalance}`);
+
+    await logBidError(taskId, "INSUFFICIENT WETH BALANCE", `Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${wethBalance}`, "error", "opensea");
+    return
+  }
+
+
+  // Convert wei to ETH for precision check
 
   // Determine precision based on price range
   let decimals;
@@ -236,8 +260,6 @@ export async function bidOnOpensea(
 
   const offerPrice = BigNumber.from(roundedWei.toString());
   const offerPriceEthFinal = Number(roundedWei) / 1e18;
-  const leverage = 50;
-  const wethBalance = await balanceChecker.getWethBalance(wallet_address);
 
   if (offerPriceEthFinal > wethBalance) {
 
@@ -307,7 +329,8 @@ export async function bidOnOpensea(
 
     const order = JSON.stringify({
       offer: offerPrice.toString(),
-      orderId: itemOrderHash
+      orderId: itemOrderHash,
+      createdAt: Date.now()
     })
 
     const sanitizedExpiry = expiry > 900 ? expiry : 900
@@ -496,7 +519,8 @@ async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: 
     const sanitizedExpiry = expiry > 900 ? expiry : 900
     const order = JSON.stringify({
       offer: offerPrice.toString(),
-      orderId: order_hash
+      orderId: order_hash,
+      createdAt: Date.now()
     })
 
     await Promise.all([
@@ -573,7 +597,7 @@ async function buildOffer(taskId: string, buildPayload: any) {
 export async function cancelOrder(orderHash: string, protocolAddress: string, privateKey: string, taskId: string) {
   if (!orderHash || !protocolAddress || !privateKey) return
 
-  const offererSignature = await signCancelOrder(taskId,orderHash, protocolAddress, privateKey);
+  const offererSignature = await signCancelOrder(taskId, orderHash, protocolAddress, privateKey);
 
   if (!offererSignature) {
     return;
