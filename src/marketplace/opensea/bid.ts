@@ -235,6 +235,18 @@ export async function bidOnOpensea(
     console.log(`Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${wethBalance}`);
 
     await logBidError(taskId, "INSUFFICIENT WETH BALANCE", `Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${wethBalance}`, "error", "opensea");
+
+    const jobs = await queue.getJobs(['prioritized']);
+    const openseaJobs: Job[] = jobs.filter(job =>
+      [OPENSEA_SCHEDULE, OPENSEA_TRAIT_BID, OPENSEA_TOKEN_BID].includes(job?.name)
+    );
+
+    if (openseaJobs.length > 0) {
+      await queue.pause()
+      await Promise.allSettled(openseaJobs.map(job => job.remove()));
+      console.log(RED + `REMOVING ${openseaJobs.length} OPENSEA JOB(S) DUE TO OUTSTANDING ORDER TO WALLET BALANCE RATIO EXCEEDING ALLOWED LIMIT.` + RESET);
+      await queue.resume()
+    }
     return
   }
 
@@ -263,7 +275,9 @@ export async function bidOnOpensea(
 
   if (offerPriceEthFinal > wethBalance) {
 
-    const message = `Offer price: ${offerPriceEthFinal} WETH  is greater than available WETH balance: ${wethBalance} WETH. SKIPPING ...`
+    const identifier = opensea_traits ? opensea_traits : asset?.tokenId ? asset?.tokenId : slug;
+    
+    const message = `[${slug.toUpperCase()}${identifier ? ` - ${identifier}` : ''}] Offer price: ${offerPriceEthFinal} WETH is greater than available WETH balance: ${wethBalance} WETH. SKIPPING OPENSEA...`
     await logBidError(taskId, "INSUFFICIENT WETH BALANCE", message, "error", "opensea");
     return
   }
@@ -343,7 +357,7 @@ export async function bidOnOpensea(
 
     trackBidRate('opensea', taskId);
 
-    const successMessage = `🎉 TOKEN OFFER POSTED TO OPENSEA SUCCESSFULLY FOR: ${slug.toUpperCase()}  TOKEN: ${asset.tokenId} 🎉`
+    const successMessage = `🎉 TOKEN OFFER POSTED TO OPENSEA SUCCESSFULLY FOR: ${slug.toUpperCase()}  TOKEN: ${asset.tokenId} ${Number(offerPriceEthFinal)} WETH 🎉`
     console.log(BLUE, JSON.stringify(successMessage), RESET);
   }
   else {
@@ -531,8 +545,8 @@ async function submitOfferToOpensea(slug: string, bidCount: string, offerPrice: 
 
     trackBidRate('opensea', taskId);
     const successMessage = opensea_traits ?
-      `🎉 TRAIT OFFER POSTED TO OPENSEA SUCCESSFULLY FOR: ${payload.criteria.collection.slug.toUpperCase()}  TRAIT: ${opensea_traits} 🎉`
-      : `🎉 COLLECTION OFFER POSTED TO OPENSEA SUCCESSFULLY FOR: ${payload.criteria.collection.slug.toUpperCase()} 🎉`
+      `🎉 TRAIT OFFER POSTED TO OPENSEA SUCCESSFULLY FOR: ${payload.criteria.collection.slug.toUpperCase()}  TRAIT: ${opensea_traits} ${(Number(offerPrice) / 1e18)} WETH 🎉`
+      : `🎉 COLLECTION OFFER POSTED TO OPENSEA SUCCESSFULLY FOR: ${payload.criteria.collection.slug.toUpperCase()} ${(Number(offerPrice) / 1e18)} WETH 🎉`
     console.log(BLUE, successMessage, RESET);
 
 

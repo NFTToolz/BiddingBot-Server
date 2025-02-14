@@ -199,7 +199,7 @@ const CANCEL_MAGICEDEN_BID = "CANCEL_MAGICEDEN_BID"
 const CANCEL_BLUR_BID = "CANCEL_BLUR_BID"
 const MAGICEDEN_MARKETPLACE = "0x9A1D00bEd7CD04BCDA516d721A596eb22Aac6834"
 const MAX_RETRIES: number = 5;
-const MARKETPLACE_WS_URL = "wss://nfttools.pro?app=bidbot";
+const MARKETPLACE_WS_URL = "wss://wss-marketplace.nfttools.website";
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY as string;
 const PRIORITIZED_THRESHOLD = RATE_LIMIT * WORKER_COUNT;
 const OPENSEA_PROTOCOL_ADDRESS = "0x0000000000000068F116a894984e2DB1123eB395"
@@ -1178,7 +1178,7 @@ async function processUpdatedTask(task: ITask) {
           floor_price = Number(stats)
         }
 
-        const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price, "blur")
+        const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price, "blur")
         const offerPrice = BigInt(Math.round(offerPriceEth * 1e18 / 1e16) * 1e16);
 
         if (traitBid) {
@@ -1220,7 +1220,7 @@ async function processUpdatedTask(task: ITask) {
           if (!data || data === 0) return
           floor_price = data;
         }
-        const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price, "opensea")
+        const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price, "opensea")
         let offerPrice = BigInt(Math.ceil(offerPriceEth * 1e18));
         const collectionDetails = await getCollectionDetails(task.contract.slug);
 
@@ -1254,7 +1254,7 @@ async function processUpdatedTask(task: ITask) {
         } else {
           floor_price = Number(await fetchMagicEdenCollectionStats(task._id, task.contract.contractAddress))
         }
-        const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price as number, "magiceden")
+        const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price as number, "magiceden")
         const offerPrice = Math.ceil(offerPriceEth * 1e18)
         const autoIds = task.tokenIds
           .filter(id => id.toString().toLowerCase().startsWith('bot'))
@@ -1472,7 +1472,6 @@ async function startTask(task: ITask, start: boolean) {
     if (task.outbidOptions.counterbid) {
       try {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
-          console.log(YELLOW + `WebSocket not ready, attempting to reconnect before subscribing to ${task.contract.slug}...` + RESET);
           await connectWebSocket();
         }
 
@@ -1872,35 +1871,6 @@ async function updateStatus(task: ITask) {
   }
 }
 
-async function unsubscribeFromCollection(task: ITask) {
-  try {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    }
-
-    const unsubscribeMessage = {
-      "slug": task.contract.slug,
-      "topic": task.contract.slug,
-      "contractAddress": task.contract.contractAddress,
-      "event": "leave_the_party",
-      "clientId": task.user.toString(),
-    };
-
-    await new Promise<void>((resolve, reject) => {
-      try {
-        ws.send(JSON.stringify(unsubscribeMessage));
-        console.log(`Unsubscribed from collection: ${task.contract.slug} `);
-        resolve();
-      } catch (err) {
-        reject(err);
-      }
-    });
-  } catch (error) {
-    console.error(RED + `Error in unsubscribeFromCollection: ` + RESET, error);
-    throw error;
-  }
-}
 
 async function updateMarketplace(task: ITask) {
   try {
@@ -2000,7 +1970,15 @@ let wsConnectionStatus: 'connected' | 'disconnected' | 'connecting' = 'disconnec
 let pingIntervalId: NodeJS.Timeout | null = null;
 
 
+
 async function connectWebSocket(): Promise<void> {
+  // Check if already connected
+  if (ws?.readyState === WebSocket.OPEN) {
+    console.log(YELLOW + "WebSocket already connected, sending ping to verify..." + RESET);
+    ws.send(JSON.stringify({ event: 'ping' }));
+    return;
+  }
+
   wsConnectionStatus = 'connecting';
   ws = new WebSocket(MARKETPLACE_WS_URL);
 
@@ -2013,8 +1991,8 @@ async function connectWebSocket(): Promise<void> {
       pingIntervalId = null;
     }
     pingIntervalId = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' })); // Custom ping message
+      if (ws.readyState === WebSocket?.OPEN) {
+        ws.send(JSON.stringify({ event: 'ping' })); // Custom ping message
         console.log('-----PING------');
       }
     }, 30000); // 15 seconds interval
@@ -2094,7 +2072,6 @@ async function connectWebSocket(): Promise<void> {
 
 }
 
-
 function attemptReconnect(): void {
   if (retryCount < MAX_RETRIES) {
     if (reconnectTimeoutId !== null) {
@@ -2112,6 +2089,8 @@ function attemptReconnect(): void {
 
 async function handleCounterBid(message: any) {
   try {
+    // console.log({ message: JSON.stringify(message) });
+
     const { contractAddress, slug } = getMarketplaceDetails(message);
 
     if (!contractAddress && !slug) {
@@ -2170,6 +2149,8 @@ async function handleCounterBidForTask(task: any, message: any) {
 
 async function handleMagicEdenCounterbid(data: any, task: ITask) {
   try {
+    // console.log(MAGENTA + JSON.stringify(data) + RESET);
+
     const domain: string = data?.data?.source?.domain
     const wallets = await (await Wallet.find({}, { address: 1, _id: 0 }).exec()).map((wallet) => wallet.address.toLowerCase())
     const maker = data?.data?.maker?.toLowerCase()
@@ -2181,11 +2162,13 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
     const currentTime = new Date().getTime();
     const expiration = Math.floor((currentTime + (duration * 60 * 1000)) / 1000);
     let floor_price: number = 0
+
     if (task.bidPrice.minType == "eth" || task.openseaBidPrice.minType === "eth") {
       floor_price = 0
     } else {
       floor_price = Number(await fetchMagicEdenCollectionStats(task._id, task.contract.contractAddress))
     }
+
 
     if (!warningBids[task._id]) {
       warningBids[task._id] = {
@@ -2198,9 +2181,15 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
     const balance = balances[task._id]
     warningBids[task._id].magiceden = false;
     const stopBid = await stopOption(task, 'magiceden', floor_price, balance)
+
     if (stopBid) return
-    const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price as number, "magiceden")
-    const magicedenOutbidMargin = task.outbidOptions.magicedenOutbidMargin || 0.0001
+
+
+    const { maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price as number, "magiceden")
+
+
+    const magicedenOutbidMargin = task?.outbidOptions?.magicedenOutbidMargin || 0.0001
+
 
     const bidType = data?.data?.criteria?.kind
     const tokenId = +data?.data?.criteria?.data?.token?.tokenId;
@@ -2210,7 +2199,7 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
 
     const selectedTraits = transformNewTask(task.selectedTraits)
 
-    const bestOffer = bestOffers[task._id].magiceden * 1e18;
+    const bestOffer = (bestOffers[task._id]?.magiceden || 0) * 1e18;
 
     if (incomingBidAmount < bestOffer) return;
 
@@ -2559,6 +2548,8 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
 
 async function handleOpenseaCounterbid(data: any, task: ITask) {
   try {
+    // console.log(BLUE + JSON.stringify(data) + RESET);
+
     const maker = data?.payload?.payload?.maker?.address.toLowerCase()
     const quantity = Number(data?.payload?.payload?.quantity) || 1
     const incomingBidAmount: number = Number(data?.payload?.payload?.base_price) / quantity;
@@ -2589,7 +2580,7 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
 
     if (stopBid) return
 
-    const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, Number(floor_price), "opensea")
+    const { maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, Number(floor_price), "opensea")
 
     const collectionDetails = await getCollectionDetails(task.contract.slug);
 
@@ -3028,7 +3019,7 @@ async function handleBlurCounterbid(data: any, task: ITask) {
 
     if (stopBid) return
 
-    const { maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, Number(floor_price), "blur")
+    const { maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, Number(floor_price), "blur")
     const selectedTraits = transformNewTask(task.selectedTraits)
     const traitBid = task.bidType === "collection" && selectedTraits && Object.keys(selectedTraits).length > 0
     const blurOutbidMargin = task.outbidOptions.blurOutbidMargin || 0.01
@@ -3323,6 +3314,8 @@ function roundToValidPrecision(priceEth: number): number {
   }
 }
 
+
+
 async function processOpenseaScheduledBid(task: ITask) {
   try {
     if (!task.running || !task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("opensea")) return
@@ -3340,7 +3333,6 @@ async function processOpenseaScheduledBid(task: ITask) {
     const WALLET_ADDRESS: string = task.wallet.address;
     const WALLET_PRIVATE_KEY: string = task.wallet.privateKey;
     const collectionDetails = await getCollectionDetails(task.contract.slug);
-
     const traitBid = selectedTraits && Object.keys(selectedTraits).length > 0
     const data = await getCollectionStats(task.contract.slug);
 
@@ -3354,15 +3346,12 @@ async function processOpenseaScheduledBid(task: ITask) {
 
     warningBids[task._id].opensea = false;
     const stopBid = await stopOption(task, 'opensea', Number(data), balances[task._id])
-
     if (stopBid) return
-
     if (!data || data === 0) return
     const floor_price = data;
     const highestOffer = await fetchOpenseaOffers(task._id, 'COLLECTION', task.contract.slug, task.contract.contractAddress, {})
 
     const [topOffer] = highestOffer
-
     const bestOfferAmount = (topOffer?.amount ?? 0) / 1e18
 
     if (!floorPrices[task._id]) {
@@ -3403,7 +3392,7 @@ async function processOpenseaScheduledBid(task: ITask) {
       return;
     }
 
-    const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price, "opensea")
+    const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price, "opensea")
     const outbidMargin = calculateOutbidMargin(maxBidPriceEth);
     const approved = await approveMarketplace(WETH_CONTRACT_ADDRESS, SEAPORT, task, maxBidPriceEth);
     if (!approved) return
@@ -3510,7 +3499,6 @@ async function processOpenseaScheduledBid(task: ITask) {
         // 2. Handle own bid case
         else if (isOwnBid) {
           const spread = (Number(topOffer.amount) - Number(secondOffer.amount)) / 1e18;
-
           // Check for overbidding
           if (spread > outbidMargin && Number(secondOffer.amount) > 0) {
             console.log(YELLOW + `Canceling overbid orders for ${task.contract.slug} - spread of ${spread} ETH exceeds margin` + RESET);
@@ -3667,7 +3655,7 @@ async function processBlurScheduledBid(task: ITask) {
     floorPrices[task._id].blur = floor_price;
     bestOffers[task._id].blur = bestOfferAmount
 
-    const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price, "blur")
+    const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price, "blur")
 
     let offerPrice = BigInt(Math.round(offerPriceEth * 1e18 / 1e16) * 1e16);
     const contractAddress = task.contract.contractAddress
@@ -4532,13 +4520,21 @@ async function processBlurTraitBid(data: {
 
 async function processMagicedenScheduledBid(task: ITask) {
   try {
+
+    console.log({ task, activeTasks });
+
     if (!task.running || !task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("magiceden")) return
+
+    console.log({ task });
+
     const filteredTasks = Object.fromEntries(
       Object.entries(task?.selectedTraits || {}).map(([category, traits]) => [
         category,
         traits.filter(trait => trait.availableInMarketplaces.includes("magiceden"))
       ]).filter(([_, traits]) => traits.length > 0)
     );
+
+    console.log({ filteredTasks });
 
     const WALLET_ADDRESS: string = task.wallet.address
     const WALLET_PRIVATE_KEY: string = task.wallet.privateKey
@@ -4602,7 +4598,7 @@ async function processMagicedenScheduledBid(task: ITask) {
     const tokenIds = bottlomListing ? [...bottlomListing, ...taskTokenIds] : [...taskTokenIds]
     const tokenBid = task.bidType === "token" && tokenIds.length > 0
 
-    const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = calculateBidPrice(task, floor_price as number, "magiceden")
+    const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price as number, "magiceden")
 
     const approved = await approveMarketplace(WETH_CONTRACT_ADDRESS, MAGICEDEN_MARKETPLACE, task, maxBidPriceEth);
     const outbidMargin = (task.outbidOptions.magicedenOutbidMargin || 0.0001) * 1e18
@@ -4665,6 +4661,9 @@ async function processMagicedenScheduledBid(task: ITask) {
     }
     else if (task.bidType.toLowerCase() === "collection" && !traitBid) {
       const currentTask = activeTasks.get(task._id)
+
+      console.log({ currentTask });
+
       if (!currentTask?.running || !currentTask.selectedMarketplaces.map((market) => market.toLowerCase()).includes("magiceden")) return;
 
       let colletionOffer = BigInt(offerPrice)
@@ -5194,7 +5193,7 @@ function getExpiry(bidDuration: { value: number; unit: string }) {
   return expiry
 }
 
-function calculateBidPrice(task: ITask, floorPrice: number, marketplaceName: "opensea" | "magiceden" | "blur"): { offerPriceEth: number; maxBidPriceEth: number, minBidPriceEth: number } {
+async function calculateBidPrice(task: ITask, floorPrice: number, marketplaceName: "opensea" | "magiceden" | "blur"): Promise<{ offerPriceEth: number; maxBidPriceEth: number, minBidPriceEth: number }> {
   const isGeneralBidPrice = task.bidPriceType === "GENERAL_BID_PRICE";
 
   const marketplaceBidPrice = marketplaceName.toLowerCase() === "blur" ? task.blurBidPrice
@@ -5228,7 +5227,8 @@ function calculateBidPrice(task: ITask, floorPrice: number, marketplaceName: "op
 
   // Validate min/max bid prices
   if (maxBidPriceEth > 0 && minBidPriceEth > maxBidPriceEth) {
-    throw new Error(`Invalid bid price configuration: Minimum bid price (${minBidPriceEth} ETH) cannot be greater than maximum bid price (${maxBidPriceEth} ETH)`);
+    await logBidError(task._id, "INVALID BID PRICE CONFIGURATION", `Minimum bid price (${minBidPriceEth} ETH) cannot be greater than maximum bid price (${maxBidPriceEth} ETH)`, "skipped", marketplaceName);
+    warningBids[task._id][marketplaceName] = true;
   }
 
 
@@ -5251,14 +5251,9 @@ async function stopOption(
     return false;
   }
 
-  // Check floor price
-  if (!floorPrice || floorPrice === 0) {
-    return true;
-  }
-
 
   // Check if floor price is outside allowed range
-  if (floorPrice < task.stopOptions.minFloorPrice || floorPrice > task.stopOptions.maxFloorPrice) {
+  if ((Number(floorPrice) && floorPrice < task.stopOptions.minFloorPrice) || floorPrice > task.stopOptions.maxFloorPrice) {
     console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
     console.log(RED + `❌ Floor price ${floorPrice} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH). Skipping...`.toUpperCase() + RESET);
     console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
@@ -5365,6 +5360,8 @@ function checkNetwork() {
 checkNetwork();
 
 let marketplaceIntervals: { [key: string]: NodeJS.Timeout } = {};
+const subscribedTasks = new Map<string, Set<string>>(); // Map<taskId, Set<marketplaces>>
+
 function subscribeToCollections(tasks: ITask[]) {
   try {
     // Check if any task has counterbidding enabled
@@ -5416,6 +5413,7 @@ function subscribeToCollections(tasks: ITask[]) {
       const subscriptionKey = `${task.contract.slug}`;
       const clientId = task.user.toString();
 
+      // Handle OpenSea subscription
       const connectToOpensea = task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("opensea");
       if (connectToOpensea) {
         const openseaSubscriptionMessage = {
@@ -5434,6 +5432,7 @@ function subscribeToCollections(tasks: ITask[]) {
         console.log('----------------------------------------------------------------------');
       }
 
+      // Handle MagicEden subscription
       const connectToMagiceden = task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("magiceden");
       if (connectToMagiceden) {
         const magicedenSubscriptionMessage = {
@@ -5452,6 +5451,7 @@ function subscribeToCollections(tasks: ITask[]) {
         console.log('----------------------------------------------------------------------');
       }
 
+      // Handle Blur subscription
       const connectToBlur = task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("blur");
       if (connectToBlur) {
         const blurSubscriptionMessage = {
@@ -5475,6 +5475,39 @@ function subscribeToCollections(tasks: ITask[]) {
   } catch (error) {
     console.error(RED + 'Error subscribing to collections' + RESET, error);
     // Don't rethrow the error to prevent server crash
+  }
+}
+
+
+async function unsubscribeFromCollection(task: ITask) {
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    }
+
+    const unsubscribeMessage = {
+      "slug": task.contract.slug,
+      "topic": task.contract.slug,
+      "contractAddress": task.contract.contractAddress,
+      "event": "leave_the_party",
+      "clientId": task.user.toString(),
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      try {
+        ws.send(JSON.stringify(unsubscribeMessage));
+        console.log(`Unsubscribed from collection: ${task.contract.slug} `);
+        // Remove task from subscribedTasks
+        subscribedTasks.delete(task._id);
+        resolve();
+      } catch (err) {
+        reject(err);
+      }
+    });
+  } catch (error) {
+    console.error(RED + `Error in unsubscribeFromCollection: ` + RESET, error);
+    throw error;
   }
 }
 

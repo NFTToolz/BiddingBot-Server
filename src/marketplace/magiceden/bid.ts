@@ -66,7 +66,8 @@ export async function bidOnMagiceden(
     const wethBalance = await balanceChecker.getWethBalance(maker);
 
     if (offerPriceEth > wethBalance) {
-      const message = `Offer price: ${offerPriceEth} WETH  is greater than available WETH balance: ${wethBalance} WETH. SKIPPING ...`
+      const identifier = trait ? `${trait.attributeKey}:${trait.attributeValue}` : tokenId ? tokenId : 'collection';
+      const message = `[${slug.toUpperCase()}${identifier ? ` - ${identifier}` : ''}] Offer price: ${offerPriceEth} WETH is greater than available WETH balance: ${wethBalance} WETH. SKIPPING  MAGICEDEN...`
       await logBidError(taskId, "INSUFFICIENT WETH BALANCE", message, "error", "magiceden");
       console.log(RED + '-----------------------------------------------------------------------------------------------------------' + RESET);
       console.log(RED + message.toUpperCase() + RESET);
@@ -590,10 +591,10 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
       );
 
       const offers = data?.orders
-        ?.sort((a, b) => Number(b.price.amount.raw) - Number(a.price.amount.raw))
+        ?.sort((a, b) => Number(b?.price?.amount?.raw) - Number(a?.price?.amount?.raw))
         ?.slice(0, 2) || []
       if (!offers.length) return [{ amount: "0", owner: "" }]
-      return offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker }))
+      return offers.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
 
     } else if (type === "TOKEN") {
       const queryParams = {
@@ -614,11 +615,10 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
         })
       );
 
-      const offers = data?.orders?.filter((data) => data.price.currency.symbol === "WETH").slice(0, 2)
+      const offers = data?.orders?.filter((data) => data?.price?.currency?.symbol === "WETH").slice(0, 2)
       if (!offers?.length) return [{ amount: "0", owner: "" }]
 
-      console.log({ tokenId: identifier, offers: offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker })) });
-      return offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker }))
+      return offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
 
     } else if (type === "TRAIT") {
       interface TraitQueryParams {
@@ -633,8 +633,8 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
         excludeEOA: 'false',
       };
 
-      if (identifier && typeof identifier === "object" && identifier.attributeKey && identifier.attributeValue) {
-        queryParams[`attributes[${identifier.attributeKey}]`] = identifier.attributeValue;
+      if (identifier && typeof identifier === "object" && identifier?.attributeKey && identifier?.attributeValue) {
+        queryParams[`attributes[${identifier?.attributeKey}]`] = identifier?.attributeValue;
       }
 
       const { data } = await limiter.schedule(() => axiosInstance.get<MagicEdenTraitOfferResponse>(
@@ -646,12 +646,12 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
           }
         }
       ));
-      const offers = data?.orders?.filter(data => data.price.currency.symbol === "WETH").slice(0, 2)
+      const offers = data?.orders?.filter(data => data?.price?.currency?.symbol === "WETH").slice(0, 2)
       if (!offers?.length) return [{ amount: "0", owner: "" }]
 
-      console.log({ traits: identifier, offers: offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker })) });
+      console.log({ traits: identifier, offers: offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker })) });
 
-      return offers.map(offer => ({ amount: offer.price.amount.raw, owner: offer.maker }))
+      return offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
     }
     return [{ amount: "0", owner: "" }]
   } catch (error: any) {
@@ -685,8 +685,8 @@ export async function fetchMagicEdenCollectionStats(taskId: string, contractAddr
       })
     );
 
-    const token: TokenData = data?.tokens.filter((token: TokenData) => token.market.floorAsk.price.currency.symbol.toLowerCase() === "weth" || token.market.floorAsk.price.currency.symbol.toLowerCase())[0]
-    return token.market.floorAsk.price.amount.decimal
+    const token: TokenData = data?.tokens?.filter((token: TokenData) => token?.market?.floorAsk?.price?.currency?.symbol?.toLowerCase() === "weth" || token?.market?.floorAsk?.price?.currency?.symbol?.toLowerCase())[0]
+    return token?.market?.floorAsk?.price?.amount?.decimal
   } catch (error: any) {
     const message = `Error fetching Magic Eden collection stats: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
     await logBidError(taskId, "FETCH COLLECTION STATS ERROR", message, "error", "magiceden");
