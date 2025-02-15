@@ -1430,7 +1430,15 @@ async function startTask(task: ITask, start: boolean) {
       ...(task.selectedMarketplaces.map(m => m.toLowerCase()).includes("magiceden") ? [{ name: MAGICEDEN_SCHEDULE, data: { ...task, running: start } }] : []),
     ];
 
-    await processBulkJobs(jobs);
+    const loopInterval = getExpiry(task.loopInterval)
+
+    console.log({ loopInterval });
+
+    if (!task.running) return;
+    
+    setInterval(async () => {
+      await processBulkJobs(jobs);
+    }, loopInterval * 1000);
 
 
   } catch (error) {
