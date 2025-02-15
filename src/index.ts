@@ -1435,7 +1435,7 @@ async function startTask(task: ITask, start: boolean) {
     console.log({ loopInterval });
 
     if (!task.running) return;
-    
+
     setInterval(async () => {
       await processBulkJobs(jobs);
     }, loopInterval * 1000);
@@ -2042,7 +2042,7 @@ function attemptReconnect(): void {
 
 async function handleCounterBid(message: any) {
   try {
-    // console.log({ message: JSON.stringify(message) });
+    console.log({ WebSocket: JSON.stringify(message) });
 
     const { contractAddress, slug } = getMarketplaceDetails(message);
 
