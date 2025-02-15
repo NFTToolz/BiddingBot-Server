@@ -468,16 +468,14 @@ export async function submitSignedOrderData(taskId: string, offerPrice: string |
 export async function cancelMagicEdenBid(orderIds: string[], privateKey: string, taskId: string) {
   try {
     if (!orderIds?.length) return;
-    const processedOrderIds = orderIds.map(async (orderId: any) => {
+    const processedOrderIds = await Promise.all(orderIds.map(async (orderId: any) => {
       try {
         const parsed = JSON.parse(orderId);
         return parsed.orderId || orderId;
       } catch (error: any) {
-        const message = `Error parsing MagicEden order ID: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
-        await logBidError(taskId, "PARSE ORDER ID ERROR", message, "error", "magiceden");
         return orderId;
       }
-    })?.filter(Boolean); // Remove any undefined/null values
+    }));
 
     if (!processedOrderIds.length) return;
 
@@ -649,7 +647,6 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
       const offers = data?.orders?.filter(data => data?.price?.currency?.symbol === "WETH").slice(0, 2)
       if (!offers?.length) return [{ amount: "0", owner: "" }]
 
-      console.log({ traits: identifier, offers: offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker })) });
 
       return offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
     }

@@ -264,7 +264,7 @@ export async function bidOnOpensea(
   }
 
   // Round to the appropriate number of decimals and convert back to wei
-  const roundedEth = Number(offerPriceEth.toFixed(decimals));
+  const roundedEth = Number(offerPriceEth);
 
   const basis = decimals === 2 ? 1e16 : decimals === 3 ? 1e15 : 1e14
   // Round to nearest 0.01 ETH (10^16 wei)
@@ -276,7 +276,7 @@ export async function bidOnOpensea(
   if (offerPriceEthFinal > wethBalance) {
 
     const identifier = opensea_traits ? opensea_traits : asset?.tokenId ? asset?.tokenId : slug;
-    
+
     const message = `[${slug.toUpperCase()}${identifier ? ` - ${identifier}` : ''}] Offer price: ${offerPriceEthFinal} WETH is greater than available WETH balance: ${wethBalance} WETH. SKIPPING OPENSEA...`
     await logBidError(taskId, "INSUFFICIENT WETH BALANCE", message, "error", "opensea");
     return
