@@ -901,7 +901,7 @@ export async function fetchOpenseaOffers(
   }
 }
 
-export async function fetchOpenseaListings(taskId: string, collectionSlug: string, limit?: number) {
+export async function fetchOpenseaListings(taskId: string, collectionSlug: string, limit: number = 100) {
   try {
     const baseUrl = `https://api.nfttools.website/opensea/api/v2/listings/collection/${collectionSlug}/all`;
     let allListings: OpenseaOrder[] = [];
@@ -914,6 +914,7 @@ export async function fetchOpenseaListings(taskId: string, collectionSlug: strin
         next: nextCursor,
         limit: Math.min(100, limit - allListings.length)
       }
+
       const { data } = await limiter.schedule(() => axiosInstance.get<OpenseaListingData>(baseUrl, {
         headers: {
           'accept': 'application/json',

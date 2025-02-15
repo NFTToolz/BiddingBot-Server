@@ -1913,10 +1913,14 @@ let pingIntervalId: NodeJS.Timeout | null = null;
 
 
 async function connectWebSocket(): Promise<void> {
+
+  const clientIds = [...new Set(currentTasks.filter(task => task.running).map(task => task.user.toString()))];
+  const clientId = clientIds[0] ?? "";
+
   // Check if already connected
   if (ws?.readyState === WebSocket.OPEN) {
     console.log(YELLOW + "WebSocket already connected, sending ping to verify..." + RESET);
-    ws.send(JSON.stringify({ event: 'ping' }));
+    ws.send(JSON.stringify({ event: 'ping', clientId }));
     return;
   }
 
@@ -1933,7 +1937,7 @@ async function connectWebSocket(): Promise<void> {
     }
     pingIntervalId = setInterval(() => {
       if (ws.readyState === WebSocket?.OPEN) {
-        ws.send(JSON.stringify({ event: 'ping' })); // Custom ping message
+        ws.send(JSON.stringify({ event: 'ping', clientId })); // Custom ping message
         console.log('-----PING------');
       }
     }, 30000); // 15 seconds interval
@@ -3337,6 +3341,8 @@ async function processOpenseaScheduledBid(task: ITask) {
         return matches ? parseInt(matches[0]) : null;
       })
       .filter(id => id !== null);
+
+
 
     const bottlomListing = await fetchOpenseaListings(task._id, task.contract.slug, autoIds[0]) ?? []
     const taskTokenIds = task.tokenIds

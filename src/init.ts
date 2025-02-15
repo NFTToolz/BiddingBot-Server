@@ -41,7 +41,37 @@ async function initialize(rateLimit: number) {
   });
   axiosRetry(axiosInstance, retryConfig);
 
+  // Add event listeners to track requests
+  let requestCount = 0;
+  let lastCheck = Date.now();
+
+  limiter.on("received", () => {
+    requestCount++;
+  });
+
+  // Calculate RPS every second
+  setInterval(() => {
+    const now = Date.now();
+    const timeElapsed = (now - lastCheck) / 1000; // Convert to seconds
+    const currentRPS = requestCount / timeElapsed;
+
+    console.log(`Current RPS: ${currentRPS.toFixed(2)}`);
+
+    // Reset counters
+    requestCount = 0;
+    lastCheck = now;
+  }, 1000);
+
   console.log(`Limiter initialized with rate limit: ${rateLimit} requests per second`);
+}
+
+// Add a function to get current counts
+export function getLimiterCounts() {
+  return {
+    queued: limiter.queued(),
+    running: limiter.running(),
+    done: limiter.done()
+  };
 }
 
 export { limiter, initialize, axiosInstance };
