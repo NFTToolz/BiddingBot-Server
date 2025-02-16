@@ -35,7 +35,8 @@ const bidStats: BidCounts = {};
 const bestOffers: BidCounts = {};
 const floorPrices: BidCounts = {};
 const balances: any = {};
-const warningBids: WarningBids = {};
+export const warningBids: WarningBids = {};
+export const warningMessage: WarningMessage = {};
 export const errorStats: BidCounts = {};
 const skipStats: BidCounts = {};
 const redis = redisClient.getClient()
@@ -246,6 +247,7 @@ async function monitorHealth() {
     console.log({ bestOffers });
     console.log({ floorPrices });
     console.log({ warningBids });
+    console.log({ warningMessage });
 
     const counts = await queue.getJobCounts();
     const used = process.memoryUsage();
@@ -469,6 +471,8 @@ startServer()
     runScheduledLoop().catch(error => {
       console.error('Failed to run scheduled loop:', error);
     })
+
+
     connectWebSocket().catch(error => {
       console.error('Failed to connect to WebSocket:', error);
     })
@@ -477,12 +481,16 @@ startServer()
     console.error('Failed to start server:', error);
   });
 
+export const rps = {
+  currentRPS: 0,
+  maxRPS: RATE_LIMIT ?? 0,
+}
 
 function broadcastBidRates() {
   const bidRates = activeTasks.size > 0 ? getAllBidRates() : 0;
   const message = JSON.stringify({
     type: 'bidRatesUpdate',
-    data: { bidRates, bidCounts: bidStats, skipCounts: skipStats, errorCounts: errorStats, floorPrices, bestOffers, warningBids }
+    data: { bidRates, bidCounts: bidStats, skipCounts: skipStats, errorCounts: errorStats, floorPrices, bestOffers, warningBids, warningMessage, rps }
   });
 
   clients.forEach(client => {
@@ -853,11 +861,9 @@ async function processBulkJobs(jobs: any[], createKey = false) {
       return;
     }
 
-    // Create a copy of jobs array and shuffle it
-    const shuffledJobs = [...jobs].sort(() => Math.random() - 0.5);
 
     // Process each job in random order
-    for (const job of shuffledJobs) {
+    for (const job of jobs) {
       if (!job?.name || !job?.data) continue;
 
       const taskId = job?.data?._id;
@@ -1430,16 +1436,7 @@ async function startTask(task: ITask, start: boolean) {
       ...(task.selectedMarketplaces.map(m => m.toLowerCase()).includes("magiceden") ? [{ name: MAGICEDEN_SCHEDULE, data: { ...task, running: start } }] : []),
     ];
 
-    const loopInterval = getExpiry(task.loopInterval)
-
-    console.log({ loopInterval });
-
-    if (!task.running) return;
-
-    setInterval(async () => {
-      await processBulkJobs(jobs);
-    }, loopInterval * 1000);
-
+    await processBulkJobs(jobs);
 
   } catch (error) {
     console.error(RED + `Error starting task ${taskId}: ` + RESET, error);
@@ -2042,8 +2039,6 @@ function attemptReconnect(): void {
 
 async function handleCounterBid(message: any) {
   try {
-    console.log({ WebSocket: JSON.stringify(message) });
-
     const { contractAddress, slug } = getMarketplaceDetails(message);
 
     if (!contractAddress && !slug) {
@@ -2151,7 +2146,10 @@ async function handleMagicEdenCounterbid(data: any, task: ITask) {
     const incomingBidAmountEth = incomingBidAmount / 1e18;
 
     if (incomingBidAmountEth < minBidPriceEth || incomingBidAmountEth > maxBidPriceEth) {
-      const message = `incoming bid ${incomingBidAmountEth} WETH for ${task.contract.slug} is less than min bid price ${minBidPriceEth} WETH or greater than max bid price ${maxBidPriceEth} WETH. Skipping ...`.toUpperCase()
+      const reason = incomingBidAmountEth < minBidPriceEth
+        ? `is less than min bid price ${minBidPriceEth} WETH`
+        : `is greater than max bid price ${maxBidPriceEth} WETH`;
+      const message = `incoming bid ${incomingBidAmountEth} WETH for ${task.contract.slug} ${reason}. Skipping ...`.toUpperCase()
       await logBidError(task._id, "INVALID BID PRICE", message, "skipped", "magiceden");
       return
     }
@@ -2545,8 +2543,11 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
     const incomingBidAmountEth = incomingBidAmount / 1e18
 
     if (incomingBidAmountEth < minBidPriceEth || incomingBidAmountEth > maxBidPriceEth) {
-      const message = `incoming bid ${incomingBidAmountEth} WETH for ${task.contract.slug} is less than min bid price ${minBidPriceEth} WETH or greater than max bid price ${maxBidPriceEth} WETH. Skipping ...`.toUpperCase()
-      await logBidError(task._id, "INVALID BID PRICE", message, "skipped", "opensea");
+      const reason = incomingBidAmountEth < minBidPriceEth
+        ? `is less than min bid price ${minBidPriceEth} WETH`
+        : `is greater than max bid price ${maxBidPriceEth} WETH`;
+      const message = `incoming bid ${incomingBidAmountEth} WETH for ${task.contract.slug} ${reason}. Skipping ...`.toUpperCase()
+      await logBidError(task._id, "INVALID BID PRICE", message, "skipped", "magiceden");
       return
     }
 
@@ -3313,6 +3314,14 @@ async function processOpenseaScheduledBid(task: ITask) {
       }
     }
 
+    if (!warningMessage[task._id]) {
+      warningMessage[task._id] = {
+        opensea: "",
+        magiceden: "",
+        blur: ""
+      }
+    }
+
     warningBids[task._id].opensea = false;
     const stopBid = await stopOption(task, 'opensea', Number(data), balances[task._id])
     if (stopBid) return
@@ -3361,6 +3370,7 @@ async function processOpenseaScheduledBid(task: ITask) {
     if (traitBid && !collectionDetails.trait_offers_enabled && !tokenBid) {
       console.log(RED + `Trait bidding is not available for ${task.contract.slug} on OpenSea.`.toUpperCase() + RESET);
       warningBids[task._id].opensea = true;
+      warningMessage[task._id].opensea = `Trait bidding is not available for ${task.contract.slug}`;
       await logBidError(task._id, "TRAIT BIDDING NOT AVAILABLE", `Trait bidding is not available for ${task.contract.slug} on OpenSea.`, "warning", "opensea");
       return;
     }
@@ -4542,6 +4552,7 @@ async function processMagicedenScheduledBid(task: ITask) {
     bestOffers[task._id].magiceden = bestOfferAmount;
 
     const autoIds = task.tokenIds
+      .map(id => id.toString().trim()) // Remove whitespace
       .filter(id => id.toString().toLowerCase().startsWith('bot'))
       .map(id => {
         const matches = id.toString().match(/\d+/);
@@ -4763,6 +4774,7 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
     else {
       const highestBid = await marketDataPromise;
       const [topOffer, secondOffer] = highestBid || [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
+
       const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(highestBid);
       const bestOfferWei = bestOffer * 1e18;
       const absoluteHighestBidAmount = Math.max(highestBidAmount, bestOfferWei);
@@ -5181,6 +5193,7 @@ async function calculateBidPrice(task: ITask, floorPrice: number, marketplaceNam
   if (maxBidPriceEth > 0 && minBidPriceEth > maxBidPriceEth) {
     await logBidError(task._id, "INVALID BID PRICE CONFIGURATION", `Minimum bid price (${minBidPriceEth} ETH) cannot be greater than maximum bid price (${maxBidPriceEth} ETH)`, "skipped", marketplaceName);
     warningBids[task._id][marketplaceName] = true;
+    warningMessage[task._id][marketplaceName] = `Minimum bid price (${minBidPriceEth} ETH) cannot be greater than maximum bid price (${maxBidPriceEth} ETH)`;
   }
 
 
@@ -5217,7 +5230,17 @@ async function stopOption(
         blur: false
       };
     }
+
+
+    if (!warningMessage[task._id]) {
+      warningMessage[task._id] = {
+        opensea: "",
+        magiceden: "",
+        blur: ""
+      };
+    }
     warningBids[task._id][marketplace] = true;
+    warningMessage[task._id][marketplace] = `Floor price ${floorPrice} ETH for ${task.contract.slug} is outside allowed range (${task.stopOptions.minFloorPrice} ETH - ${task.stopOptions.maxFloorPrice} ETH).`;
     return true;
   }
 
@@ -5236,6 +5259,9 @@ async function stopOption(
       warningBids[task._id].opensea = true;
       warningBids[task._id].magiceden = true;
       warningBids[task._id].blur = true;
+      warningMessage[task._id].opensea = `Total purchase amount (${(newBalance - balance)} ${task.contract.slug}) has reached or exceeded max purchase limit (${task.stopOptions.maxPurchase}) for ${task.contract.slug}.`;
+      warningMessage[task._id].magiceden = `Total purchase amount (${(newBalance - balance)} ${task.contract.slug}) has reached or exceeded max purchase limit (${task.stopOptions.maxPurchase}) for ${task.contract.slug}.`;
+      warningMessage[task._id].blur = `Total purchase amount (${(newBalance - balance)} ${task.contract.slug}) has reached or exceeded max purchase limit (${task.stopOptions.maxPurchase}) for ${task.contract.slug}.`;
       return true;
     }
   }
@@ -5913,7 +5939,13 @@ interface WarningBids {
   };
 }
 
-
+interface WarningMessage {
+  [key: string]: {
+    opensea: string;
+    magiceden: string;
+    blur: string;
+  };
+}
 
 export function trackBidRate(marketplace: 'opensea' | 'magiceden' | 'blur', taskId: string) {
   const now = Math.floor(Date.now() / 1000);

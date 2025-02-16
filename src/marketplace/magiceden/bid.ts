@@ -77,8 +77,6 @@ export async function bidOnMagiceden(
 
     const order = await createBidData(taskId, slug, maker, collection, quantity, weiPrice.toString(), expiration.toString(), trait, tokenId);
 
-
-
     if (!order) return
     try {
       if (tokenId) {
@@ -90,14 +88,24 @@ export async function bidOnMagiceden(
       }
     } catch (error: any) {
       const message = `Error submitting MagicEden bid: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
+      console.log(RED + message + RESET);
       await logBidError(taskId, "SUBMIT BID ERROR", message, "error", "magiceden");
       throw error
     }
     return order
   } catch (error: any) {
-    const message = `Error submitting MagicEden bid: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
-    await logBidError(taskId, "SUBMIT BID ERROR", message, "error", "magiceden");
-    console.log(`magiceden post offer error task ${slug}: `, error.response.data || error.message);
+    const identifier = trait ? `${trait.attributeKey}:${trait.attributeValue}` : tokenId ? tokenId : 'collection';
+
+    // More robust error message extraction
+    const errorMessage = error?.response?.data?.message?.errors?.[0] ||
+      error?.response?.data?.message ||
+      error?.message ||
+      'Unknown error';
+
+    const errorText = `magiceden post offer error task ${slug}${identifier ? ` - ${identifier}` : ''}: ${errorMessage}`;
+    await logBidError(taskId, "SUBMIT BID ERROR", errorText, "error", "magiceden");
+    console.log(errorText);
+
     if (!errorStats[taskId]) {
       errorStats[taskId] = {
         magiceden: 0,
@@ -132,7 +140,7 @@ async function createBidData(
   tokenId?: number | string,
 ) {
 
-  const task = currentTasks.find((task) => task.contract.slug.toLowerCase() === slug.toLowerCase() && task.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("magiceden"))
+  const task = currentTasks.find((task) => task.contract.slug.toLowerCase() === slug.toLowerCase() && task?.selectedMarketplaces?.map((marketplace) => marketplace.toLowerCase()).includes("magiceden"))
 
   if (!task) return
 
@@ -164,7 +172,7 @@ async function createBidData(
       orderKind: orderKind,
       orderbook: "reservoir",
       options: options,
-      automatedRoyalties: false,
+      automatedRoyalties: true,
       ...(tokenId ? { token: `${collection}:${tokenId}` } : trait ? { attributeKey: trait.attributeKey, attributeValue: trait.attributeValue } : {})
     }
   ];
@@ -188,8 +196,6 @@ async function createBidData(
     ));
     return order;
   } catch (error: any) {
-    const message = `Error creating MagicEden bid: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
-    await logBidError(taskId, "CREATE BID ERROR", message, "error", "magiceden");
     throw error
   }
 }
@@ -281,7 +287,7 @@ async function sendSignedOrderData(order: any, taskId: string, offerPrice: strin
 
     // check if the tasks is still active before you make the offer
     const currentTask = activeTasks.get(taskId)
-    if (!currentTask?.running || !currentTask.selectedMarketplaces.map((marketplace) => marketplace.toLowerCase()).includes("MAGICEDEN".toLowerCase())) return
+    if (!currentTask?.running || !currentTask?.selectedMarketplaces?.map((marketplace) => marketplace.toLowerCase()).includes("magiceden".toLowerCase())) return
 
     try {
       const { data: offerResponse } = await limiter.schedule(() =>
@@ -458,8 +464,6 @@ export async function submitSignedOrderData(taskId: string, offerPrice: string |
     const result = await sendSignedOrderData(order, taskId, offerPrice, privateKey, bidCount, signature, data, slug, expiry, trait, tokenId);
     return result;
   } catch (error: any) {
-    const message = `Error submitting MagicEden bid: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`
-    await logBidError(taskId, "SUBMIT BID ERROR", message, "error", "magiceden");
     throw error
   }
 
@@ -468,7 +472,7 @@ export async function submitSignedOrderData(taskId: string, offerPrice: string |
 export async function cancelMagicEdenBid(orderIds: string[], privateKey: string, taskId: string) {
   try {
     if (!orderIds?.length) return;
-    const processedOrderIds = await Promise.all(orderIds.map(async (orderId: any) => {
+    const processedOrderIds = await Promise.all(orderIds?.map(async (orderId: any) => {
       try {
         const parsed = JSON.parse(orderId);
         return parsed.orderId || orderId;
@@ -591,8 +595,8 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
       const offers = data?.orders
         ?.sort((a, b) => Number(b?.price?.amount?.raw) - Number(a?.price?.amount?.raw))
         ?.slice(0, 2) || []
-      if (!offers.length) return [{ amount: "0", owner: "" }]
-      return offers.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
+      if (!offers?.length) return [{ amount: "0", owner: "" }]
+      return offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
 
     } else if (type === "TOKEN") {
       const queryParams = {
@@ -613,9 +617,11 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
         })
       );
 
-      const offers = data?.orders?.filter((data) => data?.price?.currency?.symbol === "WETH").slice(0, 2)
+      const offers = data?.orders
+        ?.filter((data) => data?.price?.currency?.symbol === "WETH")
+        ?.sort((a, b) => Number(b?.price?.amount?.raw) - Number(a?.price?.amount?.raw))
+        ?.slice(0, 2)
       if (!offers?.length) return [{ amount: "0", owner: "" }]
-
       return offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
 
     } else if (type === "TRAIT") {
@@ -727,10 +733,10 @@ export async function fetchMagicEdenTokens(taskId: string, collectionId: string,
             }
           ))
 
-          const tokens = data.tokens.map((item) => +item.token.tokenId);
+          const tokens = data?.tokens?.map((item: any) => +item?.token?.tokenId);
           allTokens.push(...tokens);
           totalFetched += tokens.length;
-          params.continuation = data.continuation;
+          params.continuation = data?.continuation;
 
           console.log(MAGENTA, `[MAGICEDEN] Fetched ${totalFetched}/${limit} Bottom Listed Tokens`.toUpperCase(), RESET);
 

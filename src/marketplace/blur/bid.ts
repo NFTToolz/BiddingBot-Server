@@ -62,21 +62,20 @@ export async function bidOnBlur(
   }
 
   if (totalOfferAmount + offerPriceEth >= leverage * bethBalance) {
-    console.log(`Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${bethBalance}`);
-
-    await logBidError(taskId, "INSUFFICIENT BETH BALANCE", `Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${bethBalance}`, "error", "blur");
-
+    
     const jobs: Job[] = await queue.getJobs(['prioritized']);
     const blurJobs = jobs.filter(job =>
       [BLUR_SCHEDULE, BLUR_TRAIT_BID].includes(job.name)
     );
-
+    
     if (blurJobs.length > 0) {
       await queue.pause()
       await Promise.all(blurJobs.map(job => job.remove()));
       console.log(RED + `REMOVING ${blurJobs.length} BLUR JOB(S) DUE TO INSUFFICIENT BETH BALANCE` + RESET);
       await queue.resume()
     }
+    console.log(`Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${bethBalance}`);
+    await logBidError(taskId, "INSUFFICIENT BETH BALANCE", `Total offer amount: ${totalOfferAmount} + offer price: ${offerPriceEth} is greater than the leverage: ${leverage} * weth balance: ${bethBalance}`, "error", "blur");
     return
   }
 

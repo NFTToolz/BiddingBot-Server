@@ -2,6 +2,7 @@ import Bottleneck from "bottleneck";
 import axios, { AxiosInstance } from "axios";
 import axiosRetry, { IAxiosRetryConfig } from "axios-retry";
 import { config } from "dotenv";
+import { rps } from ".";
 
 config()
 
@@ -56,10 +57,12 @@ async function initialize(rateLimit: number) {
     const currentRPS = requestCount / timeElapsed;
 
     console.log(`Current RPS: ${currentRPS.toFixed(2)}`);
+    rps.currentRPS = currentRPS;
 
     // Reset counters
     requestCount = 0;
     lastCheck = now;
+
   }, 1000);
 
   console.log(`Limiter initialized with rate limit: ${rateLimit} requests per second`);
