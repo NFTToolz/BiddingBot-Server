@@ -2057,7 +2057,7 @@ function attemptReconnect(): void {
 async function handleCounterBid(message: any) {
   try {
     console.log(JSON.stringify(message));
-    
+
     const { contractAddress, slug } = getMarketplaceDetails(message);
 
     if (!contractAddress && !slug) {
@@ -3379,6 +3379,7 @@ async function processOpenseaScheduledBid(task: ITask) {
       .filter(id => id !== null);
 
     const bottlomListing = await fetchOpenseaListings(task._id, task.contract.slug, autoIds[0]) ?? []
+    
     const taskTokenIds = task.tokenIds
     const tokenIds = [...bottlomListing, ...taskTokenIds]
     const tokenBid = task.bidType === "token" && tokenIds.length > 0
@@ -4050,6 +4051,9 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
       const highestBid = await marketDataPromise;
 
       const [topOffer, secondOffer] = highestBid || [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
+
+      console.log({ tokenId: asset.tokenId, topOffer, secondOffer });
+
       const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(highestBid);
       const bestOfferWei = bestOffer * 1e18;
       const absoluteHighestBidAmount = Math.max(highestBidAmount, bestOfferWei);
