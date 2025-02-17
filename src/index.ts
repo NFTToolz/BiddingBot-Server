@@ -142,6 +142,27 @@ const workers = Array.from({ length: WORKER_COUNT }, (_, index) => new Worker(
   }
 ));
 
+workers.forEach(worker => {
+  worker.on('completed', (job: Job) => {
+    const scheduleJobs = [OPENSEA_SCHEDULE, BLUR_SCHEDULE, MAGICEDEN_SCHEDULE];
+    const jobId = job.id?.toString() || '';
+    const expectedPattern = `${job.data?._id}-${job.data?.contract?.slug}-`;
+
+    if (scheduleJobs.some(name => jobId === expectedPattern + name)) {
+      const task = job.data as ITask;
+      const taskId = task._id.toString();
+      const isActive = activeTasks.get(taskId)
+
+      if (!isActive || !isActive.running) return;
+      const interval = getExpiry(task.loopInterval);
+      setTimeout(async () => {
+        await startTask(task, true);
+      }, interval * 1000);
+      console.log(GREEN + `Schedule job ${jobId} completed successfully` + RESET);
+    }
+  });
+});
+
 
 
 const BROADCAST_INTERVAL = 1000;
@@ -247,7 +268,6 @@ async function monitorHealth() {
     console.log({ bestOffers });
     console.log({ floorPrices });
     console.log({ warningBids });
-    console.log({ warningMessage });
 
     const counts = await queue.getJobCounts();
     const used = process.memoryUsage();
@@ -701,51 +721,54 @@ async function runScheduledLoop() {
     return
   }
 
-  while (activeTasks.size > 0) {
-    try {
-      for (const [taskId, task] of activeTasks.entries()) {
-        if (!task.running) continue;
-
-        const lockInfo = taskLockMap.get(taskId) || {
-          lockedUntil: 0,
-          loopCount: 0
-        };
-
-        const now = Date.now();
-
-        // Check if task is locked
-        if (now < lockInfo.lockedUntil) {
-          const remainingTime = Math.ceil((lockInfo.lockedUntil - now) / 1000);
-          continue;
-        }
-
-        // Check for active prioritized jobs
-        if (await hasActivePrioritizedJobs(task)) {
-          lockInfo.lockedUntil = now + DEFAULT_LOCK_DURATION;
-          taskLockMap.set(taskId, lockInfo);
-          continue;
-        }
-
-        // Update lock info
-        lockInfo.loopCount++;
-        lockInfo.lockedUntil = now + DEFAULT_LOCK_DURATION;
-        lockInfo.lastUnlockTime = now + DEFAULT_LOCK_DURATION; // Store next unlock time
-        taskLockMap.set(taskId, lockInfo);
-
-        console.log(BLUE + `Starting loop #${lockInfo.loopCount} for ${task.contract.slug} (${taskId})` + RESET);
-        console.log(BLUE + `Next unlock time: ${new Date(lockInfo.lastUnlockTime).toLocaleTimeString()}` + RESET);
-
-        // Process the task
-        await startTask(task, true);
-      }
-
-      // Small delay between iterations
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-    } catch (error) {
-      console.error(RED + 'Error in runScheduledLoop:', error, RESET);
-    }
+  for (const [taskId, task] of activeTasks.entries()) {
+    if (!task.running) continue;
+    await startTask(task, true);
   }
+
+  // while (activeTasks.size > 0) {
+  //   try {
+  //     for (const [taskId, task] of activeTasks.entries()) {
+  //       if (!task.running) continue;
+
+  //       const lockInfo = taskLockMap.get(taskId) || {
+  //         lockedUntil: 0,
+  //         loopCount: 0
+  //       };
+
+  //       const now = Date.now();
+
+  //       // Check if task is locked
+  //       if (now < lockInfo.lockedUntil) {
+  //         const remainingTime = Math.ceil((lockInfo.lockedUntil - now) / 1000);
+  //         continue;
+  //       }
+
+  //       // Check for active prioritized jobs
+  //       if (await hasActivePrioritizedJobs(task)) {
+  //         lockInfo.lockedUntil = now + DEFAULT_LOCK_DURATION;
+  //         taskLockMap.set(taskId, lockInfo);
+  //         continue;
+  //       }
+
+  //       // Update lock info
+  //       lockInfo.loopCount++;
+  //       lockInfo.lockedUntil = now + DEFAULT_LOCK_DURATION;
+  //       lockInfo.lastUnlockTime = now + DEFAULT_LOCK_DURATION; // Store next unlock time
+  //       taskLockMap.set(taskId, lockInfo);
+
+  //       console.log(BLUE + `Starting loop #${lockInfo.loopCount} for ${task.contract.slug} (${taskId})` + RESET);
+  //       console.log(BLUE + `Next unlock time: ${new Date(lockInfo.lastUnlockTime).toLocaleTimeString()}` + RESET);
+
+  //       // Process the task
+  //       await startTask(task, true);
+  //     }
+
+  //     // Small delay between iterations
+  //   } catch (error) {
+  //     console.error(RED + 'Error in runScheduledLoop:', error, RESET);
+  //   }
+  // }
 }
 
 
@@ -923,17 +946,7 @@ function generateJobKey(job: any): string {
   const contractSlug = job?.data?.contract?.slug || job?.data?.slug || '';
   const name = job?.name || '';
 
-  // Include additional identifiers based on job type
-  let specificIdentifier = '';
-  if (job?.data?.tokenId) {
-    specificIdentifier = `-token-${job.data.tokenId}`;
-  } else if (job?.data?.trait) {
-    specificIdentifier = `-trait-${typeof job.data.trait === 'string' ? job.data.trait : JSON.stringify(job.data.trait)}`;
-  } else {
-    specificIdentifier = '-collection';
-  }
-
-  return `${taskId}-${contractSlug}-${name}${specificIdentifier}`;
+  return `${taskId}-${contractSlug}-${name}`;
 }
 class RateLimiter {
   private tokens: number;
@@ -1068,6 +1081,11 @@ async function processUpdatedTask(task: ITask) {
     const taskDoc = await Task.findById(task._id).select('balance').exec();
     const balance = taskDoc?.balance;
     balances[task._id] = balance
+    warningBids[task._id] = {
+      opensea: false,
+      magiceden: false,
+      blur: false
+    }
 
     if (existingTaskIndex !== -1) {
       currentTasks.splice(existingTaskIndex, 1, task);
@@ -1435,7 +1453,6 @@ async function startTask(task: ITask, start: boolean) {
       ...(task.selectedMarketplaces.map(m => m.toLowerCase()).includes("blur") ? [{ name: BLUR_SCHEDULE, data: { ...task, running: start } }] : []),
       ...(task.selectedMarketplaces.map(m => m.toLowerCase()).includes("magiceden") ? [{ name: MAGICEDEN_SCHEDULE, data: { ...task, running: start } }] : []),
     ];
-
     await processBulkJobs(jobs);
 
   } catch (error) {
@@ -2039,6 +2056,8 @@ function attemptReconnect(): void {
 
 async function handleCounterBid(message: any) {
   try {
+    console.log(JSON.stringify(message));
+    
     const { contractAddress, slug } = getMarketplaceDetails(message);
 
     if (!contractAddress && !slug) {
@@ -3359,11 +3378,8 @@ async function processOpenseaScheduledBid(task: ITask) {
       })
       .filter(id => id !== null);
 
-
-
     const bottlomListing = await fetchOpenseaListings(task._id, task.contract.slug, autoIds[0]) ?? []
     const taskTokenIds = task.tokenIds
-
     const tokenIds = [...bottlomListing, ...taskTokenIds]
     const tokenBid = task.bidType === "token" && tokenIds.length > 0
 
@@ -3376,6 +3392,9 @@ async function processOpenseaScheduledBid(task: ITask) {
     }
 
     const { offerPriceEth, maxBidPriceEth, minBidPriceEth } = await calculateBidPrice(task, floor_price, "opensea")
+
+    console.log({ offerPriceEth, maxBidPriceEth, minBidPriceEth });
+
     const outbidMargin = calculateOutbidMargin(maxBidPriceEth);
     const approved = await approveMarketplace(WETH_CONTRACT_ADDRESS, SEAPORT, task, maxBidPriceEth);
     if (!approved) return
@@ -3404,12 +3423,12 @@ async function processOpenseaScheduledBid(task: ITask) {
             maxBidPriceEth: maxBidPriceEth,
             minBidPriceEth: minBidPriceEth
           },
-          opts: { priority: TOKEN_BID_PRIORITY.OPENSEA }
+          opts: { priority: TOKEN_BID_PRIORITY.OPENSEA },
         }));
 
       await processBulkJobs(jobs, true);
-
       console.log(`ADDED ${jobs.length} ${task.contract.slug} OPENSEA TOKEN BID JOBS TO QUEUE`);
+
     } else if (traitBid && collectionDetails.trait_offers_enabled) {
       const traits = transformOpenseaTraits(selectedTraits);
       const traitJobs = traits.map((trait) => ({
@@ -3445,7 +3464,6 @@ async function processOpenseaScheduledBid(task: ITask) {
       let colletionOffer = BigInt(offerPrice)
       const orderTrackingKey = `{${task._id}}:opensea:orders`;
       const orderKeys = await getPatternKeys(orderTrackingKey, 'collection') || []
-
       const [orderKey] = orderKeys
       const ttl = await redis.ttl(orderKey)
 
@@ -3457,6 +3475,9 @@ async function processOpenseaScheduledBid(task: ITask) {
       else {
         const highestOffer = await fetchOpenseaOffers(task._id, 'COLLECTION', task.contract.slug, task.contract.contractAddress, {})
         const [topOffer, secondOffer] = highestOffer
+
+        console.log({ topOffer, secondOffer });
+
         const highestBidAmount = topOffer.amount
         const topOfferEth = Number(highestBidAmount) / 1e18;
 
@@ -3469,6 +3490,8 @@ async function processOpenseaScheduledBid(task: ITask) {
         const isOwnSecondBid = walletsArr
           .map(addr => addr.toLowerCase())
           .includes(secondOwner);
+
+        console.log({ isOwnBid, isOwnSecondBid });
 
         // Check if we're at max bid and have top positions
         if (topOfferEth === maxBidPriceEth && (isOwnBid || isOwnSecondBid) && ttl > MIN_BID_DURATION) {
@@ -4151,6 +4174,7 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
       undefined,
       asset
     )
+
   } catch (error: any) {
     if (error?.response?.data?.message?.errors[0]?.includes("Duplicate order")) {
       return;
@@ -5254,7 +5278,7 @@ async function stopOption(
     const newBalance = await contract.balanceOf(task.wallet.address)
     if (newBalance - balance >= task.stopOptions.maxPurchase) {
       console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
-      console.log(RED + `❌ Total purchase amount (${(newBalance - balance)} ETH) has reached or exceeded max purchase limit (${task.stopOptions.maxPurchase}) for ${task.contract.slug}. Skipping...`.toUpperCase() + RESET);
+      console.log(RED + `❌ Total purchase amount (${(newBalance - balance)} ${task.contract.slug}) has reached or exceeded max purchase limit (${task.stopOptions.maxPurchase}) for ${task.contract.slug}. Skipping...`.toUpperCase() + RESET);
       console.log(RED + '-----------------------------------------------------------------------------------------------------------------------------------------' + RESET);
       warningBids[task._id].opensea = true;
       warningBids[task._id].magiceden = true;
@@ -5610,7 +5634,6 @@ async function hasActivePrioritizedJobs(task: ITask): Promise<boolean> {
       const jobId = job?.id || '';
       return jobId.startsWith(baseKey);
     });
-
     return hasJobs;
   } catch (error) {
     console.error('Error checking for active prioritized jobs:', error);
