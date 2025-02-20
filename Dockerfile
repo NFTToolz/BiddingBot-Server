@@ -4,6 +4,11 @@ FROM node:20-alpine AS base
 # Check https://github.com/nodejs/docker-node/tree/b4117f9333da4138b03a546ec926ef50a31506c3#nodealpine
 RUN apk add --no-cache libc6-compat
 
+# Install Docker CLI and dependencies
+RUN apk add --no-cache \
+    libc6-compat \
+    docker-cli
+
 # Set the working directory in the container
 WORKDIR /app
 

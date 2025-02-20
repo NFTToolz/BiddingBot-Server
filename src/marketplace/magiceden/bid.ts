@@ -65,6 +65,23 @@ export async function bidOnMagiceden(
     const offerPriceEth = Number(weiPrice) / 1e18
     const wethBalance = await balanceChecker.getWethBalance(maker);
 
+    let decimals;
+    if (offerPriceEth >= 1) {
+      decimals = 2;
+    } else if (offerPriceEth >= 0.1) {
+      decimals = 3;
+    } else {
+      decimals = 4;
+    }
+
+
+    const roundedEth = Number(offerPriceEth);
+    const basis = decimals === 2 ? 1e16 : decimals === 3 ? 1e15 : 1e14
+    const roundedWei = Math.round(roundedEth * 1e18 / basis) * basis;
+
+    console.log({ weiPrice, roundedWei });
+
+
     if (offerPriceEth > wethBalance) {
       const identifier = trait ? `${trait.attributeKey}:${trait.attributeValue}` : tokenId ? tokenId : 'collection';
       const message = `[${slug.toUpperCase()}${identifier ? ` - ${identifier}` : ''}] Offer price: ${offerPriceEth} WETH is greater than available WETH balance: ${wethBalance} WETH. SKIPPING  MAGICEDEN...`
@@ -80,11 +97,11 @@ export async function bidOnMagiceden(
     if (!order) return
     try {
       if (tokenId) {
-        await submitSignedOrderData(taskId, weiPrice, privateKey, bidCount, order, wallet, slug, expiry, undefined, tokenId)
+        await submitSignedOrderData(taskId, roundedWei.toString(), privateKey, bidCount, order, wallet, slug, expiry, undefined, tokenId)
       } else if (trait) {
-        await submitSignedOrderData(taskId, weiPrice, privateKey, bidCount, order, wallet, slug, expiry, trait, undefined)
+        await submitSignedOrderData(taskId, roundedWei.toString(), privateKey, bidCount, order, wallet, slug, expiry, trait, undefined)
       } else {
-        await submitSignedOrderData(taskId, weiPrice, privateKey, bidCount, order, wallet, slug, expiry, undefined, undefined)
+        await submitSignedOrderData(taskId, roundedWei.toString(), privateKey, bidCount, order, wallet, slug, expiry, undefined, undefined)
       }
     } catch (error: any) {
       const message = `Error submitting MagicEden bid: ${error?.response?.data?.message?.errors?.[0] || error?.message?.errors?.[0] || error?.message || error}`

@@ -1,51 +1,55 @@
 {
-	"collection": "trademark-by-jack-butcher",
-	"name": "Trademark by Jack Butcher",
+	"collection": "friendship-bracelets-by-alexis-andre",
+	"name": "Friendship Bracelets by Alexis André",
 	"description": "",
-	"image_url": "https://i.seadn.io/s/raw/files/76978409238f7da640912e64ad4574a5.png?w=500&auto=format",
-	"banner_image_url": "https://i.seadn.io/s/primary-drops/0x8cdbd7010bd197848e95c1fd7f6e870aac9b0d3c/31014883:about:media:ec766f17-0a5c-4720-9c4c-1e19406230de.png?w=500&auto=format",
-	"owner": "0x2f04b356efb1058cfb6aeca0e4ab7caa36679e1f",
+	"image_url": "https://i.seadn.io/gcs/files/01de134db029be955aa892ea066c085f.png?w=500&auto=format",
+	"banner_image_url": "https://i.seadn.io/gcs/files/c5c7c2d6261bbf4aabedfa65e663efa2.png?w=500&auto=format",
+	"owner": "0xcf00ec2b327bcfa2bee2d8a5aee0a7671d08a283",
 	"safelist_status": "verified",
 	"category": "art",
 	"is_disabled": false,
 	"is_nsfw": false,
-	"trait_offers_enabled": false,
+	"trait_offers_enabled": true,
 	"collection_offers_enabled": true,
-	"opensea_url": "https://opensea.io/collection/trademark-by-jack-butcher",
+	"opensea_url": "https://opensea.io/collection/friendship-bracelets-by-alexis-andre",
 	"project_url": "",
 	"wiki_url": "",
-	"discord_url": "https://discord.gg/aoicommunity",
+	"discord_url": "",
 	"telegram_url": "",
-	"twitter_username": "ArtOnInternet",
-	"instagram_username": "artoninternet",
+	"twitter_username": "",
+	"instagram_username": "",
 	"contracts": [],
 	"editors": [
-		"0x2f04b356efb1058cfb6aeca0e4ab7caa36679e1f",
-		"0xc8f8e2f59dd95ff67c3d39109eca2e2a017d4c8a",
-		"0xd24586de6ee52870297cd22fb4555484af96760d"
+		"0xe6c800e8ca832ebbd2b814455de4c13eedba528c",
+		"0xcf00ec2b327bcfa2bee2d8a5aee0a7671d08a283",
+		"0x2776621ff536af829919ab6cba8db434aeba43f9",
+		"0xb0244ec7ee22bc98aba1ba6aa0947b29b691bd83",
+		"0xc489b60e161737c64ac2ee4e85d055cfbf10bad5"
 	],
 	"fees": [
 		{
-			"fee": 2.5,
+			"fee": 0.5,
 			"recipient": "0x0000a26b00c1f0df003000390027140000faa719",
 			"required": true
 		},
 		{
 			"fee": 5,
-			"recipient": "0xc8f8e2f59dd95ff67c3d39109eca2e2a017d4c8a",
+			"recipient": "0x2776621ff536af829919ab6cba8db434aeba43f9",
 			"required": true
 		},
 		{
 			"fee": 2.5,
-			"recipient": "0xd4f76bbd27168c7d9f2da881bf8ccbab44e2bd4a",
-			"required": true
-		},
-		{
-			"fee": 2.5,
-			"recipient": "0xd533f117a926244974ac2690145ed04829e72a39",
+			"recipient": "0x6c093fe8bc59e1e0cae2ec10f0b717d3d182056b",
 			"required": true
 		}
 	],
-	"total_supply": 10000,
-	"created_date": "2023-11-16"
+	"rarity": {
+		"strategy_id": "openrarity",
+		"strategy_version": "0.7.1b0",
+		"calculated_at": "2023-05-03T01:13:21.016005",
+		"max_rank": 38564,
+		"tokens_scored": 38572
+	},
+	"total_supply": 38651,
+	"created_date": "2022-11-03"
 }

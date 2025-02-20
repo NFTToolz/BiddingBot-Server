@@ -1,27 +1,62 @@
 services:
   server:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ayenisholah/bidding-bot-server:latest
+    platform: linux/amd64
+    restart: always
     ports:
       - "3003:3003"
+    environment:
+      PORT: 3003
+      REDIS_NODES: '[{"host":"redis-node-1","port":6379},{"host":"redis-node-2","port":6379},{"host":"redis-node-3","port":6379},{"host":"redis-node-4","port":6379},{"host":"redis-node-5","port":6379},{"host":"redis-node-6","port":6379}]'
+      REDIS_NET_MAP: '{"redis-node-1:6379":{"host":"redis-node-1","port":6379},"redis-node-2:6379":{"host":"redis-node-2","port":6379},"redis-node-3:6379":{"host":"redis-node-3","port":6379},"redis-node-4:6379":{"host":"redis-node-4","port":6379},"redis-node-5:6379":{"host":"redis-node-5","port":6379},"redis-node-6:6379":{"host":"redis-node-6","port":6379}}'
+      ALCHEMY_API_KEY: "HGWgCONolXMB2op5UjPH1YreDCwmSbvx"
+      MONGODB_URI: "mongodb://mongodb:27017/BIDDING_BOT"
+      RATE_LIMIT: 32
+      API_KEY: d3348c68-097d-48b5-b5f0-0313cc05e92d
     depends_on:
       - mongodb
       - redis-cluster-init
-    environment:
-      - PORT=3003
-      - REDIS_NODES=[{"host":"redis-node-1","port":6379},{"host":"redis-node-2","port":6379},{"host":"redis-node-3","port":6379},{"host":"redis-node-4","port":6379},{"host":"redis-node-5","port":6379},{"host":"redis-node-6","port":6379}]
-      - REDIS_NET_MAP={"redis-node-1:6379":{"host":"redis-node-1","port":6379},"redis-node-2:6379":{"host":"redis-node-2","port":6379},"redis-node-3:6379":{"host":"redis-node-3","port":6379},"redis-node-4:6379":{"host":"redis-node-4","port":6379},"redis-node-5:6379":{"host":"redis-node-5","port":6379},"redis-node-6:6379":{"host":"redis-node-6","port":6379}}
-      - ALCHEMY_API_KEY=HGWgCONolXMB2op5UjPH1YreDCwmSbvx
-      - MONGODB_URI=mongodb://mongodb:27017/BIDDING_BOT
-      - API_KEY=d3348c68-097d-48b5-b5f0-0313cc05e92d
-      - RATE_LIMIT=100
     networks:
-      - redis-cluster
+      - my_network
+  client:
+    image: ayenisholah/bidding-bot-client:latest
+    platform: linux/amd64
+    restart: always
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+      REDIS_NODES: '[{"host":"redis-node-1","port":6379},{"host":"redis-node-2","port":6379},{"host":"redis-node-3","port":6379},{"host":"redis-node-4","port":6379},{"host":"redis-node-5","port":6379},{"host":"redis-node-6","port":6379}]'
+      REDIS_NET_MAP: '{"redis-node-1:6379":{"host":"redis-node-1","port":6379},"redis-node-2:6379":{"host":"redis-node-2","port":6379},"redis-node-3:6379":{"host":"redis-node-3","port":6379},"redis-node-4:6379":{"host":"redis-node-4","port":6379},"redis-node-5:6379":{"host":"redis-node-5","port":6379},"redis-node-6:6379":{"host":"redis-node-6","port":6379}}'
+      NEXT_PUBLIC_ALCHEMY_API_KEY: "HGWgCONolXMB2op5UjPH1YreDCwmSbvx"
+      CLIENT_URL: "http://localhost:3001/"
+      NEXT_PUBLIC_CLIENT_URL: "http://localhost:3001/"
+      NEXT_PUBLIC_SERVER_WEBSOCKET: "ws://localhost:3003"
+      MONGODB_URI: "mongodb://mongodb:27017/BIDDING_BOT"
+      RATE_LIMIT: 32
+      API_KEY: d3348c68-097d-48b5-b5f0-0313cc05e92d
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3001"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - mongodb
+      - server
+      - redis-cluster-init
+    networks:
+      - my_network
+
+  mongodb:
+    image: mongo:latest
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - my_network
 
   redis-node-1:
-    image: "redis:latest"
-    container_name: "redis_node_1"
+    image: redis:latest
     command: redis-server --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
@@ -31,15 +66,13 @@ services:
       --cluster-announce-ip redis-node-1
       --cluster-announce-port 6379
       --cluster-announce-bus-port 16379
-    ports:
-      - "8001:6379"
-      - "18001:16379"
+    volumes:
+      - redis_data_1:/data
     networks:
-      - redis-cluster
+      - my_network
 
   redis-node-2:
-    image: "redis:latest"
-    container_name: "redis_node_2"
+    image: redis:latest
     command: redis-server --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
@@ -49,15 +82,13 @@ services:
       --cluster-announce-ip redis-node-2
       --cluster-announce-port 6379
       --cluster-announce-bus-port 16379
-    ports:
-      - "8002:6379"
-      - "18002:16379"
+    volumes:
+      - redis_data_2:/data
     networks:
-      - redis-cluster
+      - my_network
 
   redis-node-3:
-    image: "redis:latest"
-    container_name: "redis_node_3"
+    image: redis:latest
     command: redis-server --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
@@ -67,15 +98,13 @@ services:
       --cluster-announce-ip redis-node-3
       --cluster-announce-port 6379
       --cluster-announce-bus-port 16379
-    ports:
-      - "8003:6379"
-      - "18003:16379"
+    volumes:
+      - redis_data_3:/data
     networks:
-      - redis-cluster
+      - my_network
 
   redis-node-4:
-    image: "redis:latest"
-    container_name: "redis_node_4"
+    image: redis:latest
     command: redis-server --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
@@ -85,15 +114,13 @@ services:
       --cluster-announce-ip redis-node-4
       --cluster-announce-port 6379
       --cluster-announce-bus-port 16379
-    ports:
-      - "8004:6379"
-      - "18004:16379"
+    volumes:
+      - redis_data_4:/data
     networks:
-      - redis-cluster
+      - my_network
 
   redis-node-5:
-    image: "redis:latest"
-    container_name: "redis_node_5"
+    image: redis:latest
     command: redis-server --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
@@ -103,15 +130,13 @@ services:
       --cluster-announce-ip redis-node-5
       --cluster-announce-port 6379
       --cluster-announce-bus-port 16379
-    ports:
-      - "8005:6379"
-      - "18005:16379"
+    volumes:
+      - redis_data_5:/data
     networks:
-      - redis-cluster
+      - my_network
 
   redis-node-6:
-    image: "redis:latest"
-    container_name: "redis_node_6"
+    image: redis:latest
     command: redis-server --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
@@ -121,24 +146,18 @@ services:
       --cluster-announce-ip redis-node-6
       --cluster-announce-port 6379
       --cluster-announce-bus-port 16379
-    ports:
-      - "8006:6379"
-      - "18006:16379"
+    volumes:
+      - redis_data_6:/data
     networks:
-      - redis-cluster
+      - my_network
 
   redis-cluster-init:
-    image: "redis:latest"
-    container_name: "redis_cluster_init"
+    image: redis:latest
     command: >
       /bin/sh -c '
         echo "Waiting for Redis nodes..." &&
-        sleep 20 &&
-        redis-cli --cluster create redis-node-1:6379 redis-node-2:6379 redis-node-3:6379 redis-node-4:6379 redis-node-5:6379 redis-node-6:6379  --cluster-replicas 1 --cluster-yes &&
-        echo "Waiting for cluster to stabilize..." &&
-        sleep 10 &&
-        redis-cli -h redis-node-1 cluster info &&
-        redis-cli -h redis-node-1 cluster nodes &&
+        sleep 15 &&
+        redis-cli --cluster create redis-node-1:6379 redis-node-2:6379 redis-node-3:6379 redis-node-4:6379 redis-node-5:6379 redis-node-6:6379 --cluster-replicas 1 --cluster-yes &&
         echo "Cluster initialization complete"
       '
     depends_on:
@@ -148,51 +167,18 @@ services:
       - redis-node-4
       - redis-node-5
       - redis-node-6
-
     networks:
-      - redis-cluster
-
-  cluster-health-check:
-    image: "redis:latest"
-    depends_on:
-      - redis-cluster-init
-    command: >
-      /bin/sh -c '
-        until redis-cli -h redis-node-1 cluster info | grep -q "cluster_state:ok"; do
-          echo "Waiting for Redis cluster to be ready..."
-          sleep 2
-        done;
-        echo "Redis cluster is ready!"
-        exit 0
-      '
-    networks:
-      - redis-cluster
-
-  mongodb:
-    image: "mongo:latest"
-    container_name: "mongodb_container"
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-    networks:
-      - redis-cluster
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
-      interval: 10s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
+      - my_network
 
 volumes:
+  mongodb_data:
   redis_data_1:
   redis_data_2:
   redis_data_3:
   redis_data_4:
   redis_data_5:
   redis_data_6:
-  mongodb_data:
 
 networks:
-  redis-cluster:
+  my_network:
     driver: bridge

@@ -15,7 +15,7 @@ const lockManager = new DistributedLockManager({
   defaultTTLSeconds: 36000
 });
 
-export async function getCollectionDetails(slug: string) {
+export async function getCollectionDetails(slug: string, contractAddress: string) {
 
   if (collectionCache[slug]) {
     return collectionCache[slug];
@@ -37,9 +37,6 @@ export async function getCollectionDetails(slug: string) {
           }
         ));
 
-      if (!collection || !collection.editors || !collection.contracts) {
-        throw new Error('Invalid collection data received from API');
-      }
 
       let creator_fees;
       let enforceCreatorFee = false;
@@ -58,7 +55,7 @@ export async function getCollectionDetails(slug: string) {
 
       const result = {
         address: collection.editors[0],
-        primary_asset_contracts_address: collection.contracts[0].address,
+        primary_asset_contracts_address: contractAddress,
         creator_fees: creator_fees,
         enforceCreatorFee: enforceCreatorFee,
         ...collection
@@ -71,6 +68,8 @@ export async function getCollectionDetails(slug: string) {
         slug,
         error: error?.response?.data || error.message || error
       });
+
+      console.log(error);
 
       throw new Error(`Failed to fetch collection details for ${slug}: ${error?.response?.data?.message || error.message || 'Unknown error'}`);
     }
