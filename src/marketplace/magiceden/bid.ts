@@ -79,9 +79,6 @@ export async function bidOnMagiceden(
     const basis = decimals === 2 ? 1e16 : decimals === 3 ? 1e15 : 1e14
     const roundedWei = Math.round(roundedEth * 1e18 / basis) * basis;
 
-    console.log({ weiPrice, roundedWei });
-
-
     if (offerPriceEth > wethBalance) {
       const identifier = trait ? `${trait.attributeKey}:${trait.attributeValue}` : tokenId ? tokenId : 'collection';
       const message = `[${slug.toUpperCase()}${identifier ? ` - ${identifier}` : ''}] Offer price: ${offerPriceEth} WETH is greater than available WETH balance: ${wethBalance} WETH. SKIPPING  MAGICEDEN...`
@@ -319,10 +316,10 @@ async function sendSignedOrderData(order: any, taskId: string, offerPrice: strin
           }
         )
       );
-      const successMessage = tokenId ? `🎉 TOKEN OFFER POSTED TO MAGICEDEN SUCCESSFULLY FOR: ${slug.toUpperCase()} TOKEN: ${tokenId} 🎉` :
+      const successMessage = tokenId ? `🎉 TOKEN OFFER POSTED TO MAGICEDEN SUCCESSFULLY FOR: ${slug.toUpperCase()} TOKEN: ${tokenId} ${Number(offerPrice) / 1e18} WETH 🎉` :
         trait ?
-          `🎉 TRAIT OFFER POSTED TO MAGICEDEN SUCCESSFULLY FOR: ${slug.toUpperCase()} TRAIT: ${JSON.stringify(trait)} 🎉`
-          : `🎉 OFFER POSTED TO MAGICEDEN SUCCESSFULLY FOR: ${slug.toUpperCase()} 🎉`
+          `🎉 TRAIT OFFER POSTED TO MAGICEDEN SUCCESSFULLY FOR: ${slug.toUpperCase()} TRAIT: ${JSON.stringify(trait)} ${Number(offerPrice) / 1e18} WETH 🎉`
+          : `🎉 OFFER POSTED TO MAGICEDEN SUCCESSFULLY FOR: ${slug.toUpperCase()} ${Number(offerPrice) / 1e18} WETH 🎉`
 
       const identifier = trait ? `${trait.attributeKey}:${trait.attributeValue}` : tokenId ? tokenId : 'collection';
 
@@ -616,17 +613,9 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
       return offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
 
     } else if (type === "TOKEN") {
-      const queryParams = {
-        token: `${contractAddress}:${identifier}`,
-        sortBy: 'price',
-        status: 'active',
-        excludeEOA: 'false',
-        limit: '100',
-        normalizeRoyalties: 'false',
-      };
+      const url = `https://api.nfttools.website/magiceden/v3/rtp/ethereum/orders/bids/v6?token=${contractAddress}:${identifier}&sortBy=price&status=active&excludeEOA=false&limit=2`
       const { data } = await limiter.schedule(() =>
-        axiosInstance.get<MagicEdenTokenResponse>(URL, {
-          params: queryParams,
+        axiosInstance.get<any>(url, {
           headers: {
             'content-type': 'application/json',
             'X-NFT-API-Key': API_KEY
@@ -635,11 +624,12 @@ export async function fetchMagicEdenOffer(taskId: string, type: "COLLECTION" | "
       );
 
       const offers = data?.orders
-        ?.filter((data) => data?.price?.currency?.symbol === "WETH")
-        ?.sort((a, b) => Number(b?.price?.amount?.raw) - Number(a?.price?.amount?.raw))
+        ?.filter((data: any) => data?.price?.currency?.symbol === "WETH")
+        ?.sort((a: any, b: any) => Number(b?.price?.amount?.raw) - Number(a?.price?.amount?.raw))
         ?.slice(0, 2)
+
       if (!offers?.length) return [{ amount: "0", owner: "" }]
-      return offers?.map(offer => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
+      return offers?.map((offer: any) => ({ amount: offer?.price?.amount?.raw, owner: offer?.maker }))
 
     } else if (type === "TRAIT") {
       interface TraitQueryParams {
@@ -754,9 +744,6 @@ export async function fetchMagicEdenTokens(taskId: string, collectionId: string,
           allTokens.push(...tokens);
           totalFetched += tokens.length;
           params.continuation = data?.continuation;
-
-          console.log(MAGENTA, `[MAGICEDEN] Fetched ${totalFetched}/${limit} Bottom Listed Tokens`.toUpperCase(), RESET);
-
         } while (params.continuation && totalFetched < limit);
 
         return allTokens.slice(0, limit);

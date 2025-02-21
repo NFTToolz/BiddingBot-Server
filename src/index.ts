@@ -98,73 +98,76 @@ const QUEUE_OPTIONS: QueueOptions = {
 
 let netEnabled = true;
 
-const workers = Array.from({ length: WORKER_COUNT }, (_, index) => new Worker(
-  QUEUE_NAME,
-  async (job) => {
-    try {
-      const shutdown = new Promise((_, reject) => {
-        process.once('SIGTERM', () => reject(new Error('Worker shutdown')));
-      });
-      if (!netEnabled) return;
+const WORKER_METRICS = new Map<string, {
+  lastJobStart: number;
+  lastJobEnd: number;
+  jobCount: number;
+  idleTime: number;
+}>();
+
+
+
+const workers = Array.from({ length: WORKER_COUNT }, (_, index) => {
+  const workerId = `worker-${index + 1}`;
+  WORKER_METRICS.set(workerId, {
+    lastJobStart: Date.now(),
+    lastJobEnd: Date.now(),
+    jobCount: 0,
+    idleTime: 0
+  });
+
+  const worker = new Worker(
+    QUEUE_NAME,
+    async (job) => {
+      const metrics = WORKER_METRICS.get(workerId)!;
+      metrics.lastJobStart = Date.now();
+      metrics.jobCount++;
+
       try {
-        const result = await Promise.race([
-          processJob(job),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Job timeout')), JOB_TIMEOUT)),
-          shutdown
-        ]);
-        broadcastBidRates();
+        const result = await processJob(job);
+        metrics.lastJobEnd = Date.now();
         return result;
-      } catch (error: any) {
-        if (error.message === 'Job timeout') {
-          return
-        }
+      } catch (error) {
+        metrics.lastJobEnd = Date.now();
         throw error;
       }
-    } catch (error: any) {
-      if (error.message === 'Job timeout') {
-        return
-      }
-      throw error;
-    }
-  },
-  {
-    connection: redis,
-    prefix: '{bull}',
-    concurrency: RATE_LIMIT,
-    lockDuration: 30000,
-    stalledInterval: 30000,
-    lockRenewTime: 15000,
-    maxStalledCount: 1,
-    limiter: {
-      max: RATE_LIMIT,
-      duration: 1000
     },
-    name: `worker-${index + 1}`
-  }
-));
-
-workers.forEach(worker => {
-  worker.on('completed', (job: Job) => {
-    const scheduleJobs = [OPENSEA_SCHEDULE, BLUR_SCHEDULE, MAGICEDEN_SCHEDULE];
-    const jobId = job.id?.toString() || '';
-    const expectedPattern = `${job.data?._id}-${job.data?.contract?.slug}-`;
-
-    if (scheduleJobs.some(name => jobId === expectedPattern + name)) {
-      const task = job.data as ITask;
-      const taskId = task._id.toString();
-      const isActive = activeTasks.get(taskId)
-
-      if (!isActive || !isActive.running) return;
-      const interval = getExpiry(task.loopInterval);
-      setTimeout(async () => {
-        await startTask(task, true);
-      }, interval * 1000);
-      console.log(GREEN + `Schedule job ${jobId} completed successfully` + RESET);
+    {
+      connection: redis,
+      prefix: '{bull}',
+      concurrency: RATE_LIMIT * WORKER_COUNT,
+      lockDuration: 30000,
+      stalledInterval: 30000,
+      lockRenewTime: 15000,
+      maxStalledCount: 1,
+      limiter: {
+        max: RATE_LIMIT * WORKER_COUNT,
+        duration: 1000
+      },
+      name: `worker-${index + 1}`
     }
-  });
+  );
+
+  return worker;
 });
 
+workers.forEach(worker => {
+  worker.on('completed', async (job: Job) => {
+    const taskId = job.data?._id
+    const task = activeTasks.get(taskId)
+    if (!task || !task.running) return;
 
+    const hasActiveJobs = await hasActivePrioritizedJobs(task)
+
+    if (task && !hasActiveJobs) {
+      const loopInterval = getExpiry(task.loopInterval)
+      setTimeout(async () => {
+        await startTask(task, true);
+      }, loopInterval * 1000);
+    }
+
+  });
+});
 
 const BROADCAST_INTERVAL = 1000;
 setInterval(broadcastBidRates, BROADCAST_INTERVAL);
@@ -319,7 +322,6 @@ async function monitorHealth() {
 
     const activeWorkers = workers.filter(w => w.isRunning()).length;
     console.log(BLUE + '\n👷 Worker Status:' + RESET, `${GREEN}✅ ${activeWorkers}/${WORKER_COUNT} Workers Active${RESET}`);
-
   } catch (error) {
     console.error(RED + '❌ Error monitoring health:' + RESET, error);
   }
@@ -492,7 +494,6 @@ startServer()
     runScheduledLoop().catch(error => {
       console.error('Failed to run scheduled loop:', error);
     })
-
 
     connectWebSocket().catch(error => {
       console.error('Failed to connect to WebSocket:', error);
@@ -861,71 +862,85 @@ function createJobKey(job: Job) {
 
 
 async function processBulkJobs(jobs: any[], createKey = false) {
+  console.log(`[${new Date().toISOString()}] Processing bulk jobs batch: ${jobs.length} jobs`);
+  const startTime = Date.now();
+
   if (!jobs?.length) return;
+
   const rateLimiter = new RateLimiter(MAX_PRIORITIZED_JOBS);
+  const chunks = chunk(jobs, MAX_PRIORITIZED_JOBS);
 
   try {
-    // Memory usage check
-    const memUsage = process.memoryUsage();
-    const memoryUsagePercent = (memUsage.heapUsed / os.totalmem()) * 100;
 
-    if (memoryUsagePercent > MAX_MEMORY_USAGE) {
-      console.log(YELLOW + `Memory usage high (${memoryUsagePercent.toFixed(1)}%). Waiting for GC...` + RESET);
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      global.gc?.();
-      return;
-    }
+    for (const [chunkIndex, currentChunk] of chunks.entries()) {
+      console.log(`[${new Date().toISOString()}] Processing chunk ${chunkIndex + 1}/${chunks.length}, size: ${currentChunk.length}`);
+      const chunkStartTime = Date.now();
 
-    // Queue capacity check 
-    const counts = await queue.getJobCounts();
-    const prioritizedCount = counts.prioritized || 0;
+      try {
+        const memUsage = process.memoryUsage();
+        const memoryUsagePercent = (memUsage.heapUsed / os.totalmem()) * 100;
 
-    if (prioritizedCount > MAX_PRIORITIZED_JOBS) {
-      await waitForQueueDrain();
-      return;
-    }
-
-
-    // Process each job in random order
-    for (const job of jobs) {
-      if (!job?.name || !job?.data) continue;
-
-      const taskId = job?.data?._id;
-      if (taskId && !activeTasks.get(taskId)?.running) {
-        continue;
-      }
-
-      const isCancel = job.name.toLowerCase().includes('cancel');
-      let jobKey;
-
-      if (!isCancel) {
-        jobKey = createKey ? createJobKey(job) : generateJobKey(job);
-        const existingJob = await queue.getJob(jobKey);
-        if (existingJob) continue;
-      }
-
-      await rateLimiter.acquire();
-      await queue.add(
-        job.name,
-        job.data,
-        {
-          ...(jobKey ? { jobId: jobKey } : {}),
-          ...job?.opts,
-          removeOnComplete: true,
-          removeOnFail: true,
-          timeout: JOB_TIMEOUT,
-          attempts: 3,
-          backoff: {
-            type: 'exponential',
-            delay: 1000
-          }
+        if (memoryUsagePercent > MAX_MEMORY_USAGE) {
+          console.log(YELLOW + `Memory usage high (${memoryUsagePercent.toFixed(1)}%). Waiting for GC...` + RESET);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          global.gc?.();
+          continue;
         }
-      );
 
-      // Randomize delay between jobs (between 50-150ms)
-      const randomDelay = Math.floor(Math.random() * 100) + 50;
-      await new Promise(resolve => setTimeout(resolve, randomDelay));
+        const counts = await queue.getJobCounts();
+        const prioritizedCount = counts.prioritized || 0;
+
+        if (prioritizedCount > MAX_PRIORITIZED_JOBS) {
+          await waitForQueueDrain();
+          continue;
+        }
+
+        const validJobs = currentChunk.filter(job => {
+          if (!job?.name || !job?.data) return false;
+
+          const taskId = job?.data?._id;
+          if (!taskId) return false;
+
+          const task = activeTasks.get(taskId);
+          if (!task?.running) {
+            return false;
+          }
+          return true;
+        });
+
+        if (!validJobs.length) continue;
+
+        await rateLimiter.acquire();
+        await queue.addBulk(
+          validJobs.map(job => ({
+            name: job.name,
+            data: job.data,
+            opts: {
+              ...(createKey ? { jobId: createJobKey(job) } : { jobId: generateJobKey(job) }
+              ),
+              ...job?.opts,
+              removeOnComplete: true,
+              removeOnFail: true,
+              timeout: JOB_TIMEOUT,
+              attempts: 3,
+              backoff: {
+                type: 'exponential',
+                delay: 1000
+              }
+            }
+          }))
+        );
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        const chunkDuration = Date.now() - chunkStartTime;
+        console.log(`[${new Date().toISOString()}] Chunk ${chunkIndex + 1} completed in ${chunkDuration}ms`);
+      } catch (error) {
+        console.error(RED + `Error processing chunk ${chunkIndex + 1}:`, error, RESET);
+      }
     }
+
+    const totalDuration = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] Bulk jobs processing completed in ${totalDuration}ms`);
 
   } catch (error) {
     console.error(RED + `Error processing jobs:`, error, RESET);
@@ -3275,8 +3290,6 @@ function handleBlurMessages(message: any) {
   return contractAddress
 }
 
-// At the top of the file, add this global variable
-
 function calculateOutbidMargin(currentPrice: number): number {
   if (currentPrice < 0.1) {
     return 0.0001;
@@ -3348,6 +3361,7 @@ async function processOpenseaScheduledBid(task: ITask) {
       };
     }
     bestOffers[task._id].opensea = bestOfferAmount;
+
     const autoIds = task.tokenIds
       .filter(id => id.toString().toLowerCase().startsWith('bot'))
       .map(id => {
@@ -3356,8 +3370,11 @@ async function processOpenseaScheduledBid(task: ITask) {
       })
       .filter(id => id !== null);
 
+    const amount = autoIds[0]
+    const bottlomListing = autoIds ? await fetchOpenseaListings(task._id, task.contract.slug, amount) : []
     const taskTokenIds = task.tokenIds
-    const tokenIds = [...taskTokenIds]
+
+    const tokenIds = bottlomListing ? [...bottlomListing, ...taskTokenIds] : [...taskTokenIds]
     const tokenBid = task.bidType === "token" && tokenIds.length > 0
 
     if (traitBid && !collectionDetails.trait_offers_enabled && !tokenBid) {
@@ -3374,8 +3391,8 @@ async function processOpenseaScheduledBid(task: ITask) {
 
 
     if (tokenBid) {
-      const bottlomListing = autoIds ? await fetchOpenseaListings(task._id, task.contract.slug, autoIds[0]) ?? [] : []
-      const tokenIds = [...bottlomListing, ...taskTokenIds]
+
+
 
       const jobs = tokenIds
         .filter(token => !isNaN(Number(token)))
@@ -3471,7 +3488,7 @@ async function processOpenseaScheduledBid(task: ITask) {
         const highestOffer = await fetchOpenseaOffers(task._id, 'COLLECTION', task.contract.slug, task.contract.contractAddress, {})
         const [topOffer, secondOffer] = highestOffer
 
-        console.log({ topOffer, secondOffer });
+        console.log({ MARKETPLACE: OPENSEA, TYPE: 'COLLECTION', topOffer, secondOffer });
 
         const highestBidAmount = topOffer.amount
         const topOfferEth = Number(highestBidAmount) / 1e18;
@@ -3908,6 +3925,8 @@ async function processOpenseaTraitBid(data: {
     else {
       const highestBid = await marketDataPromise;
       const [topOffer, secondOffer] = highestBid || [{ amount: 0, owner: "" }, { amount: 0 }];
+      console.log({ MARKETPLACE: OPENSEA, TYPE: 'TRAIT', trait, topOffer, secondOffer });
+
       const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(highestBid);
       const bestOfferWei = bestOffer * 1e18;
 
@@ -4081,6 +4100,8 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
     } else {
       const highestBid = await marketDataPromise;
       const [topOffer, secondOffer] = highestBid || [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
+      console.log({ MARKETPLACE: OPENSEA, TYPE: 'TOKEN', tokenId: asset.tokenId, topOffer, secondOffer });
+
       const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(highestBid);
       const bestOfferWei = bestOffer * 1e18;
       const owner = topOffer && typeof topOffer === 'object' ? topOffer.owner?.toLowerCase() : '';
@@ -4700,6 +4721,8 @@ async function processMagicedenScheduledBid(task: ITask) {
       else {
         const [highestBid, secondBestOffer] = await marketDataPromise || [{ amount: "0", owner: "" }];
 
+        console.log({ MARKETPLACE: MAGICEDEN, TYPE: 'COLLECTION', highestBid, secondBestOffer });
+
         const highestBidAmount = typeof highestBid === 'object' && highestBid ? Number(highestBid.amount) : Number(highestBid);
 
         const topOfferEth = Number(highestBidAmount) / 1e18;
@@ -4802,10 +4825,15 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
 
     const floor_price = Number(await fetchMagicEdenCollectionStats(task._id, task.contract.contractAddress))
 
+    if (!floorPrices[task._id]) {
+      floorPrices[task._id] = {
+        opensea: 0,
+        magiceden: floor_price,
+        blur: 0
+      };
+    }
     floorPrices[task._id].magiceden = floor_price;
-
     const { offerPriceEth, maxBidPriceEth } = await calculateBidPrice(task, floor_price as number, "magiceden")
-
     const approved = await approveMarketplace(WETH_CONTRACT_ADDRESS, MAGICEDEN_MARKETPLACE, task, maxBidPriceEth);
 
     if (!approved) return
@@ -4821,8 +4849,6 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
 
     const bestOffer = bestOffers[_id]?.magiceden || 0;
 
-    const marketDataPromise = outbidOptions?.outbid ? fetchMagicEdenOffer(_id, "TOKEN", contractAddress, tokenId.toString()) : null
-
     let tokenOffer = Number(offerPriceEth * 1e18)
 
     if (!outbidOptions.outbid) {
@@ -4832,10 +4858,9 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
     }
 
     else {
-      const highestBid = await marketDataPromise;
-      const [topOffer, secondOffer] = highestBid || [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
-
-      const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(highestBid);
+      const [topOffer, secondOffer] = await fetchMagicEdenOffer(_id, "TOKEN", contractAddress, tokenId.toString()) || [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
+      console.log({ MARKETPLACE: MAGICEDEN, TYPE: 'TOKEN', tokenId: tokenId, topOffer, secondOffer });
+      const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(0);
       const bestOfferWei = bestOffer * 1e18;
       const absoluteHighestBidAmount = Math.max(highestBidAmount, bestOfferWei);
       const absoluteHighestBidAmountEth = Number(absoluteHighestBidAmount) / 1e18;
@@ -4851,6 +4876,8 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
 
       const topOfferEth = Number(absoluteHighestBidAmount) / 1e18;
 
+      // console.log({ isOwnBid, topOffer: topOffer, secondOffer: secondOffer, bestOffer: bestOfferWei });
+
       if (topOfferEth === maxBidPriceEth && (isOwnBid || isOwnSecondBid) && ttl > MIN_BID_DURATION) {
         console.log(YELLOW + `Skipping magiceden token bid for ${slug} ${tokenId} - we have top bid at max price ${maxBidPriceEth} ETH with ${ttl / 60} minutes remaining`.toUpperCase() + RESET);
         return;
@@ -4860,12 +4887,12 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
         tokenOffer = Math.ceil(absoluteHighestBidAmount + (outbidMargin * 1e18))
       }
 
+
       else if (isOwnBid) {
+
         const absoluteSecondBidAmount = Math.max(Number(secondOffer.amount), Number(bestOfferWei));
         const spread = (Number(highestBidAmount) - Number(absoluteSecondBidAmount)) / 1e18;
-
         if (Math.abs(spread - outbidMargin) > ACCEPTABLE_MARGIN_DIFF && Number(secondOffer.amount) > 0) {
-
           if (orderKeys.length > 0) {
             const extractedOrderIds = await extractMagicedenOrderHash(orderKeys)
             await queue.add(CANCEL_MAGICEDEN_BID, { orderIds: extractedOrderIds, privateKey: privateKey, orderKeys: orderKeys, taskId: _id });
@@ -4921,6 +4948,8 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
       const extractedOrderIds = await extractMagicedenOrderHash(orderKeys)
       await queue.add(CANCEL_MAGICEDEN_BID, { orderIds: extractedOrderIds, privateKey, orderKeys: orderKeys, taskId: _id });
     }
+
+
     await bidOnMagiceden(_id, bidCount, address, contractAddress, quantity, tokenOffer.toString(), privateKey, slug, undefined, tokenId)
   } catch (error) {
     console.error(RED + `Error processing MagicEden token bid for task: ${data?.slug} ` + RESET, error);
@@ -5008,6 +5037,7 @@ async function processMagicedenTraitBid(data: {
 
     else {
       const [highestBid, secondBestOffer] = await marketDataPromise || [{ amount: "0", owner: "" }];
+      console.log({ MARKETPLACE: MAGICEDEN, TYPE: 'TRAIT', trait: JSON.stringify(trait), highestBid, secondBestOffer });
       const highestBidAmount = typeof highestBid === 'object' && highestBid ? Number(highestBid.amount) : Number(highestBid);
       const owner = highestBid && typeof highestBid === 'object' ? highestBid.owner?.toLowerCase() : '';
       const isOwnBid = walletsArr
@@ -5762,7 +5792,6 @@ async function approveMarketplace(currency: string, marketplace: string, task: I
 }
 
 
-// In the hasActivePrioritizedJobs function:
 async function hasActivePrioritizedJobs(task: ITask): Promise<boolean> {
   try {
     const jobs = await queue.getJobs(['prioritized', 'active']);
@@ -5772,6 +5801,7 @@ async function hasActivePrioritizedJobs(task: ITask): Promise<boolean> {
       const jobId = job?.id || '';
       return jobId.startsWith(baseKey);
     });
+
     return hasJobs;
   } catch (error) {
     console.error('Error checking for active prioritized jobs:', error);
