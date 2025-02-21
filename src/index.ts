@@ -19,7 +19,7 @@ import { getCollectionDetails, getCollectionStats } from "./functions";
 
 import mongoose from 'mongoose';
 import Task from "./models/task.model";
-import { Queue, Worker, Job, QueueOptions, JobType } from "bullmq";
+import { Queue, Worker, Job, QueueOptions, JobType, QueueEvents } from "bullmq";
 import Wallet from "./models/wallet.model";
 import redisClient from "./utils/redis";
 import { WETH_CONTRACT_ADDRESS, WETH_MIN_ABI } from "./constants";
@@ -107,67 +107,108 @@ const WORKER_METRICS = new Map<string, {
 
 
 
-const workers = Array.from({ length: WORKER_COUNT }, (_, index) => {
-  const workerId = `worker-${index + 1}`;
-  WORKER_METRICS.set(workerId, {
-    lastJobStart: Date.now(),
-    lastJobEnd: Date.now(),
-    jobCount: 0,
-    idleTime: 0
-  });
+// Replace the worker configuration with optimized settings
+const workers = Array.from({ length: WORKER_COUNT }, (_, index) => new Worker(
+  QUEUE_NAME,
+  async (job) => {
+    try {
+      // Add timeout protection for job processing
+      const result = await Promise.race([
+        processJob(job),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Job timeout')), JOB_TIMEOUT)
+        )
+      ]);
 
-  const worker = new Worker(
-    QUEUE_NAME,
-    async (job) => {
-      const metrics = WORKER_METRICS.get(workerId)!;
-      metrics.lastJobStart = Date.now();
-      metrics.jobCount++;
-
-      try {
-        const result = await processJob(job);
-        metrics.lastJobEnd = Date.now();
-        return result;
-      } catch (error) {
-        metrics.lastJobEnd = Date.now();
-        throw error;
-      }
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  },
+  {
+    connection: redis,
+    prefix: '{bull}',
+    concurrency: RATE_LIMIT * WORKER_COUNT,
+    lockDuration: 30000,
+    stalledInterval: 30000,
+    limiter: {
+      max: RATE_LIMIT * WORKER_COUNT,
+      duration: 1000
     },
-    {
-      connection: redis,
-      prefix: '{bull}',
-      concurrency: RATE_LIMIT * WORKER_COUNT,
-      lockDuration: 30000,
-      stalledInterval: 30000,
-      lockRenewTime: 15000,
-      maxStalledCount: 1,
-      limiter: {
-        max: RATE_LIMIT * WORKER_COUNT,
-        duration: 1000
-      },
-      name: `worker-${index + 1}`
+    maxStalledCount: 1,
+    name: `worker-${index + 1}`
+  }
+));
+
+// Track drained status for each worker
+const workerDrainedStatus = new Map<string, boolean>();
+
+workers.forEach(async (worker) => {
+  // Initialize drain status
+  workerDrainedStatus.set(worker.name ?? '', false);
+
+  worker.on('drained', async () => {
+    // Mark this worker as drained
+    workerDrainedStatus.set(worker.name ?? '', true);
+
+    // Check if all workers are drained
+    const allDrained = Array.from(workerDrainedStatus.values()).every(status => status);
+
+    if (allDrained) {
+      // Reset drain status for next round
+      workers.forEach(w => workerDrainedStatus.set(w.name ?? '', false));
+
+      // Process tasks only when all workers are drained
+      for (const [taskId, task] of activeTasks.entries()) {
+        const hasActiveJobs = await hasActivePrioritizedJobs(task);
+        const loopInterval = getExpiry(task.loopInterval);
+        if (!task.running || hasActiveJobs) continue;
+
+        setTimeout(async () => {
+          await startTask(task, true);
+        }, loopInterval * 1000);
+      }
     }
-  );
-
-  return worker;
-});
-
-workers.forEach(worker => {
-  worker.on('completed', async (job: Job) => {
-    const taskId = job.data?._id
-    const task = activeTasks.get(taskId)
-    if (!task || !task.running) return;
-
-    const hasActiveJobs = await hasActivePrioritizedJobs(task)
-
-    if (task && !hasActiveJobs) {
-      const loopInterval = getExpiry(task.loopInterval)
-      setTimeout(async () => {
-        await startTask(task, true);
-      }, loopInterval * 1000);
-    }
-
   });
 });
+
+
+const taskTimers = new Map<string, NodeJS.Timeout>();
+
+async function scheduleNextTaskRun(taskId: string) {
+  // Clear any existing timer
+  const existingTimer = taskTimers.get(taskId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const task = activeTasks.get(taskId);
+  if (!task || !task.running) {
+    taskTimers.delete(taskId);
+    return;
+  }
+
+  const loopInterval = getExpiry(task.loopInterval);
+  const timer = setTimeout(async () => {
+    taskTimers.delete(taskId);
+    if (task.running) {
+      await startTask(task, true);
+    }
+  }, loopInterval * 1000);
+
+  // Store new timer
+  taskTimers.set(taskId, timer);
+}
+
+function cleanupTaskTimers() {
+  for (const [taskId, timer] of taskTimers.entries()) {
+    const task = activeTasks.get(taskId);
+    if (!task || !task.running) {
+      clearTimeout(timer);
+      taskTimers.delete(taskId);
+    }
+  }
+}
 
 const BROADCAST_INTERVAL = 1000;
 setInterval(broadcastBidRates, BROADCAST_INTERVAL);
@@ -334,6 +375,11 @@ setInterval(monitorHealth, HEALTH_CHECK_INTERVAL);
 async function cleanup() {
   try {
     console.log(YELLOW + '\n=== Starting Cleanup ===');
+
+    // Clear all task timers
+    for (const timer of taskTimers.values()) {
+      clearTimeout(timer);
+    }
     // Clear task locks
     taskLockMap.clear();
     console.log('Cleared task locks...');
@@ -723,10 +769,12 @@ async function runScheduledLoop() {
     return
   }
 
+  // while (activeTasks.size > 0) { 
   for (const [taskId, task] of activeTasks.entries()) {
     if (!task.running) continue;
     await startTask(task, true);
   }
+  // }
 
   // while (activeTasks.size > 0) {
   //   try {
@@ -862,88 +910,80 @@ function createJobKey(job: Job) {
 
 
 async function processBulkJobs(jobs: any[], createKey = false) {
-  console.log(`[${new Date().toISOString()}] Processing bulk jobs batch: ${jobs.length} jobs`);
-  const startTime = Date.now();
-
   if (!jobs?.length) return;
 
-  const rateLimiter = new RateLimiter(MAX_PRIORITIZED_JOBS);
-  const chunks = chunk(jobs, MAX_PRIORITIZED_JOBS);
+  // Initialize rate limiter
+  const rateLimiter = new RateLimiter(RATE_LIMIT);
 
-  try {
+  // Process in smaller chunks to prevent memory issues
+  const chunks = chunk(jobs, RATE_LIMIT * WORKER_COUNT);
 
-    for (const [chunkIndex, currentChunk] of chunks.entries()) {
-      console.log(`[${new Date().toISOString()}] Processing chunk ${chunkIndex + 1}/${chunks.length}, size: ${currentChunk.length}`);
-      const chunkStartTime = Date.now();
+  for (const [chunkIndex, currentChunk] of chunks.entries()) {
+    try {
+      // Check memory usage
+      const memUsage = process.memoryUsage();
+      const memoryUsagePercent = (memUsage.heapUsed / os.totalmem()) * 100;
 
-      try {
-        const memUsage = process.memoryUsage();
-        const memoryUsagePercent = (memUsage.heapUsed / os.totalmem()) * 100;
-
-        if (memoryUsagePercent > MAX_MEMORY_USAGE) {
-          console.log(YELLOW + `Memory usage high (${memoryUsagePercent.toFixed(1)}%). Waiting for GC...` + RESET);
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          global.gc?.();
-          continue;
-        }
-
-        const counts = await queue.getJobCounts();
-        const prioritizedCount = counts.prioritized || 0;
-
-        if (prioritizedCount > MAX_PRIORITIZED_JOBS) {
-          await waitForQueueDrain();
-          continue;
-        }
-
-        const validJobs = currentChunk.filter(job => {
-          if (!job?.name || !job?.data) return false;
-
-          const taskId = job?.data?._id;
-          if (!taskId) return false;
-
-          const task = activeTasks.get(taskId);
-          if (!task?.running) {
-            return false;
-          }
-          return true;
-        });
-
-        if (!validJobs.length) continue;
-
-        await rateLimiter.acquire();
-        await queue.addBulk(
-          validJobs.map(job => ({
-            name: job.name,
-            data: job.data,
-            opts: {
-              ...(createKey ? { jobId: createJobKey(job) } : { jobId: generateJobKey(job) }
-              ),
-              ...job?.opts,
-              removeOnComplete: true,
-              removeOnFail: true,
-              timeout: JOB_TIMEOUT,
-              attempts: 3,
-              backoff: {
-                type: 'exponential',
-                delay: 1000
-              }
-            }
-          }))
-        );
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        const chunkDuration = Date.now() - chunkStartTime;
-        console.log(`[${new Date().toISOString()}] Chunk ${chunkIndex + 1} completed in ${chunkDuration}ms`);
-      } catch (error) {
-        console.error(RED + `Error processing chunk ${chunkIndex + 1}:`, error, RESET);
+      if (memoryUsagePercent > MAX_MEMORY_USAGE) {
+        console.log(YELLOW + `Memory usage high (${memoryUsagePercent.toFixed(1)}%). Waiting for GC...` + RESET);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        global.gc?.();
+        continue;
       }
+
+      // Check queue health
+      const counts = await queue.getJobCounts();
+      const prioritizedCount = counts.prioritized || 0;
+
+      if (prioritizedCount > MAX_PRIORITIZED_JOBS) {
+        await waitForQueueDrain();
+        continue;
+      }
+
+      // Filter out jobs for stopped tasks
+      const activeJobs = currentChunk.filter(job => {
+        const taskId = job?.data?._id;
+        if (!taskId) return true; // Keep jobs without taskId
+
+        const task = activeTasks.get(taskId);
+        if (task && !task?.running) {
+          return false;
+        }
+        return true;
+      });
+
+      if (!activeJobs.length) {
+        console.log(YELLOW + `No active jobs in chunk ${chunkIndex + 1}, skipping...` + RESET);
+        continue;
+      }
+
+      // Process chunk with rate limiting and bulk add
+      await rateLimiter.acquire();
+      await queue.addBulk(
+        activeJobs.map(job => ({
+          name: job?.name,
+          data: job?.data,
+          opts: {
+            ...(createKey ? { jobId: createJobKey(job) } : job?.name?.includes('SCHEDULE') || job?.name?.includes('CANCEL') ? { jobId: generateJobKey(job) } : {}),
+            ...job?.opts,
+            removeOnComplete: true,
+            removeOnFail: true,
+            timeout: JOB_TIMEOUT,
+            attempts: 1,
+            backoff: {
+              type: 'fixed',
+              delay: 1000
+            }
+          }
+        }))
+      );
+
+      // Small delay between chunks
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+    } catch (error) {
+      console.error(RED + `Error processing chunk ${chunkIndex + 1}:`, error, RESET);
     }
-
-    const totalDuration = Date.now() - startTime;
-    console.log(`[${new Date().toISOString()}] Bulk jobs processing completed in ${totalDuration}ms`);
-
-  } catch (error) {
-    console.error(RED + `Error processing jobs:`, error, RESET);
   }
 }
 
@@ -1463,7 +1503,29 @@ async function startTask(task: ITask, start: boolean) {
       ...(task.selectedMarketplaces.map(m => m.toLowerCase()).includes("blur") ? [{ name: BLUR_SCHEDULE, data: { ...task, running: start } }] : []),
       ...(task.selectedMarketplaces.map(m => m.toLowerCase()).includes("magiceden") ? [{ name: MAGICEDEN_SCHEDULE, data: { ...task, running: start } }] : []),
     ];
-    await processBulkJobs(jobs);
+
+
+    if (task.selectedMarketplaces.map(m => m.toLowerCase()).includes("opensea")) {
+      await queue.add(OPENSEA_SCHEDULE,
+        { ...task, running: start },
+        { deduplication: { id: OPENSEA_SCHEDULE + task._id.toString() } }
+      )
+    }
+
+    if (task.selectedMarketplaces.map(m => m.toLowerCase()).includes("magiceden")) {
+      await queue.add(MAGICEDEN_SCHEDULE,
+        { ...task, running: start },
+        { deduplication: { id: MAGICEDEN_SCHEDULE + task._id.toString() } }
+
+      )
+    }
+
+    if (task.selectedMarketplaces.map(m => m.toLowerCase()).includes("blur")) {
+      await queue.add(BLUR_SCHEDULE,
+        { ...task, running: start },
+        { deduplication: { id: BLUR_SCHEDULE + task._id.toString() } }
+      )
+    }
 
   } catch (error) {
     console.error(RED + `Error starting task ${taskId}: ` + RESET, error);
@@ -1473,6 +1535,12 @@ async function startTask(task: ITask, start: boolean) {
 
 async function stopTask(task: ITask, start: boolean, marketplace?: string) {
   const taskId = task._id.toString();
+
+  const existingTimer = taskTimers.get(taskId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    taskTimers.delete(taskId);
+  }
   try {
     if (!marketplace || task.selectedMarketplaces.length === 0) {
       markTaskAsAborted(taskId);
@@ -1760,10 +1828,10 @@ async function cancelOpenseaBids(orderKeys: string[], privateKey: string, taskId
     const parsed = JSON.parse(order);
     return {
       name: CANCEL_OPENSEA_BID,
-      data: { privateKey, orderId: parsed.orderId, taskId, orderKey: orderKeys[index] }
+      data: { privateKey, orderId: parsed.orderId, taskId, orderKey: orderKeys[index] },
     }
-  });
-  await processBulkJobs(cancelData);
+  }).filter((item) => item !== undefined)
+  await queue.addBulk(cancelData)
 }
 
 async function extractMagicedenOrderHash(orderKeys: string[]): Promise<string[]> {
@@ -2666,10 +2734,10 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
             const parsed = JSON.parse(order);
             return {
               name: CANCEL_OPENSEA_BID,
-              data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+              data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
             }
-          });
-          await processBulkJobs(cancelData);
+          }).filter((item) => item !== undefined)
+          await queue.addBulk(cancelData)
         }
         return;
       }
@@ -2732,8 +2800,8 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
             name: CANCEL_OPENSEA_BID,
             data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
           }
-        });
-        await processBulkJobs(cancelData);
+        }).filter((item) => item !== undefined)
+        await queue.addBulk(cancelData)
       }
     }
 
@@ -2801,10 +2869,10 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
             const parsed = JSON.parse(order);
             return {
               name: CANCEL_OPENSEA_BID,
-              data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+              data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
             }
-          });
-          await processBulkJobs(cancelData);
+          }).filter((item) => item !== undefined)
+          await queue.addBulk(cancelData)
         }
 
         return;
@@ -2857,10 +2925,10 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
           const parsed = JSON.parse(order);
           return {
             name: CANCEL_OPENSEA_BID,
-            data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+            data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
           }
-        });
-        await processBulkJobs(cancelData);
+        }).filter((item) => item !== undefined)
+        await queue.addBulk(cancelData)
       }
 
     }
@@ -2925,10 +2993,10 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
             const parsed = JSON.parse(order);
             return {
               name: CANCEL_OPENSEA_BID,
-              data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+              data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
             }
-          });
-          await processBulkJobs(cancelData);
+          }).filter((item) => item !== undefined)
+          await queue.addBulk(cancelData)
         }
         return;
       }
@@ -2979,10 +3047,10 @@ async function handleOpenseaCounterbid(data: any, task: ITask) {
           const parsed = JSON.parse(order);
           return {
             name: CANCEL_OPENSEA_BID,
-            data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+            data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
           }
-        });
-        await processBulkJobs(cancelData);
+        }).filter((item) => item !== undefined)
+        await queue.addBulk(cancelData)
       }
     }
 
@@ -3525,10 +3593,10 @@ async function processOpenseaScheduledBid(task: ITask) {
                 const parsed = JSON.parse(order);
                 return {
                   name: CANCEL_OPENSEA_BID,
-                  data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+                  data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
                 }
-              });
-              await processBulkJobs(cancelData);
+              }).filter((item) => item !== undefined)
+              await queue.addBulk(cancelData)
             }
             // Place new bid at optimal level
             colletionOffer = BigInt(secondOffer.amount + (outbidMargin * 1e18));
@@ -3575,10 +3643,10 @@ async function processOpenseaScheduledBid(task: ITask) {
                 const parsed = JSON.parse(order);
                 return {
                   name: CANCEL_OPENSEA_BID,
-                  data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+                  data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
                 }
-              });
-              await processBulkJobs(cancelData);
+              }).filter((item) => item !== undefined)
+              await queue.addBulk(cancelData)
             }
             return;
           }
@@ -3596,10 +3664,10 @@ async function processOpenseaScheduledBid(task: ITask) {
           const parsed = JSON.parse(order);
           return {
             name: CANCEL_OPENSEA_BID,
-            data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] }
+            data: { privateKey: task.wallet.privateKey, orderId: parsed.orderId, taskId: task._id, orderKey: orderKeys[index] },
           }
-        });
-        await processBulkJobs(cancelData);
+        }).filter((item) => item !== undefined)
+        await queue.addBulk(cancelData)
       }
 
       console.log({ topOffer: Number(topOffer.amount) / 1e18, colletionOffer: Number(colletionOffer) / 1e18 });
@@ -3965,10 +4033,10 @@ async function processOpenseaTraitBid(data: {
               const parsed = JSON.parse(order);
               return {
                 name: CANCEL_OPENSEA_BID,
-                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] }
+                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] },
               }
-            });
-            await processBulkJobs(cancelData);
+            }).filter((item) => item !== undefined)
+            await queue.addBulk(cancelData)
           }
           traitOffer = BigInt(absoluteSecondBidAmount + (outbidMargin * 1e18));
         }
@@ -4012,10 +4080,10 @@ async function processOpenseaTraitBid(data: {
               const parsed = JSON.parse(order);
               return {
                 name: CANCEL_OPENSEA_BID,
-                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] }
+                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] },
               }
-            });
-            await processBulkJobs(cancelData);
+            }).filter((item) => item !== undefined)
+            await queue.addBulk(cancelData)
           }
           return;
         }
@@ -4030,10 +4098,10 @@ async function processOpenseaTraitBid(data: {
         const parsed = JSON.parse(order);
         return {
           name: CANCEL_OPENSEA_BID,
-          data: { privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] }
+          data: { privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] },
         }
-      });
-      await processBulkJobs(cancelData)
+      }).filter((item) => item !== undefined)
+      await queue.addBulk(cancelData)
     }
 
     await bidOnOpensea(
@@ -4132,10 +4200,10 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
               const parsed = JSON.parse(order);
               return {
                 name: CANCEL_OPENSEA_BID,
-                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] }
+                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] },
               }
-            });
-            await processBulkJobs(cancelData);
+            }).filter((item) => item !== undefined)
+            await queue.addBulk(cancelData)
           }
 
           tokenOffer = BigInt(highestBidAmount + (outbidMargin * 1e18));
@@ -4181,10 +4249,10 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
               const parsed = JSON.parse(order);
               return {
                 name: CANCEL_OPENSEA_BID,
-                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] }
+                data: { privateKey: privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] },
               }
-            });
-            await processBulkJobs(cancelData);
+            }).filter((item) => item !== undefined)
+            await queue.addBulk(cancelData)
           }
           return;
         }
@@ -4199,10 +4267,10 @@ async function processOpenseaTokenBid(data: IProcessOpenseaTokenBidData) {
         const parsed = JSON.parse(order);
         return {
           name: CANCEL_OPENSEA_BID,
-          data: { privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] }
+          data: { privateKey, orderId: parsed.orderId, taskId: _id, orderKey: orderKeys[index] },
         }
-      });
-      await processBulkJobs(cancelData)
+      }).filter((item) => item !== undefined)
+      await queue.addBulk(cancelData)
     }
 
     await bidOnOpensea(
@@ -4860,23 +4928,24 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
     else {
       const [topOffer, secondOffer] = await fetchMagicEdenOffer(_id, "TOKEN", contractAddress, tokenId.toString()) || [{ amount: 0, owner: "" }, { amount: 0, owner: "" }];
       console.log({ MARKETPLACE: MAGICEDEN, TYPE: 'TOKEN', tokenId: tokenId, topOffer, secondOffer });
-      const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount) : Number(0);
+
+      // Add null checks and default values
+      const highestBidAmount = typeof topOffer === 'object' && topOffer ? Number(topOffer.amount || 0) : 0;
       const bestOfferWei = bestOffer * 1e18;
       const absoluteHighestBidAmount = Math.max(highestBidAmount, bestOfferWei);
       const absoluteHighestBidAmountEth = Number(absoluteHighestBidAmount) / 1e18;
-      const owner = topOffer && typeof topOffer === 'object' ? topOffer.owner?.toLowerCase() : '';
+      const owner = topOffer && typeof topOffer === 'object' ? topOffer.owner?.toLowerCase() || '' : '';
       const isOwnBid = walletsArr
         .map(addr => addr.toLowerCase())
         .includes(owner);
 
-      const secondOwner = secondOffer?.owner;
+      // Add null check for secondOffer
+      const secondOwner = secondOffer && typeof secondOffer === 'object' ? secondOffer.owner?.toLowerCase() || '' : '';
       const isOwnSecondBid = walletsArr
         .map(addr => addr.toLowerCase())
         .includes(secondOwner);
 
       const topOfferEth = Number(absoluteHighestBidAmount) / 1e18;
-
-      // console.log({ isOwnBid, topOffer: topOffer, secondOffer: secondOffer, bestOffer: bestOfferWei });
 
       if (topOfferEth === maxBidPriceEth && (isOwnBid || isOwnSecondBid) && ttl > MIN_BID_DURATION) {
         console.log(YELLOW + `Skipping magiceden token bid for ${slug} ${tokenId} - we have top bid at max price ${maxBidPriceEth} ETH with ${ttl / 60} minutes remaining`.toUpperCase() + RESET);
@@ -4887,12 +4956,13 @@ async function processMagicedenTokenBid(data: IMagicedenTokenBidData) {
         tokenOffer = Math.ceil(absoluteHighestBidAmount + (outbidMargin * 1e18))
       }
 
-
       else if (isOwnBid) {
-
-        const absoluteSecondBidAmount = Math.max(Number(secondOffer.amount), Number(bestOfferWei));
+        // Add null check for secondOffer.amount
+        const secondOfferAmount = secondOffer && typeof secondOffer === 'object' ? Number(secondOffer.amount || 0) : 0;
+        const absoluteSecondBidAmount = Math.max(secondOfferAmount, Number(bestOfferWei));
         const spread = (Number(highestBidAmount) - Number(absoluteSecondBidAmount)) / 1e18;
-        if (Math.abs(spread - outbidMargin) > ACCEPTABLE_MARGIN_DIFF && Number(secondOffer.amount) > 0) {
+
+        if (Math.abs(spread - outbidMargin) > ACCEPTABLE_MARGIN_DIFF && secondOfferAmount > 0) {
           if (orderKeys.length > 0) {
             const extractedOrderIds = await extractMagicedenOrderHash(orderKeys)
             await queue.add(CANCEL_MAGICEDEN_BID, { orderIds: extractedOrderIds, privateKey: privateKey, orderKeys: orderKeys, taskId: _id });
@@ -5797,12 +5867,13 @@ async function hasActivePrioritizedJobs(task: ITask): Promise<boolean> {
     const jobs = await queue.getJobs(['prioritized', 'active']);
     const baseKey = `${task._id}-${task.contract?.slug}`;
 
-    const hasJobs = jobs.some(job => {
+    const hasJobs = jobs.filter(job => {
       const jobId = job?.id || '';
       return jobId.startsWith(baseKey);
     });
+    console.log({ activePrioritizedJobs: hasJobs.length });
 
-    return hasJobs;
+    return hasJobs.length > 1
   } catch (error) {
     console.error('Error checking for active prioritized jobs:', error);
     return false;
